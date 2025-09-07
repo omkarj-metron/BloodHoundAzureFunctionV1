@@ -219,7 +219,7 @@ def run_finding_trends_collection_process() -> bool:
             failed_submissions = 0
 
             successful_submissions, failed_submissions = send_finding_trends_to_azure_monitor(
-                all_findings_to_send[:20],
+                all_findings_to_send,
                 bloodhound_manager,
                 azure_monitor_token,
                 current_tenant_domain,

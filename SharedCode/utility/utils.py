@@ -1,8 +1,29 @@
 import os
 import logging
+from dataclasses import dataclass
+from typing import Dict, List, Tuple, Optional, Any
 from azure.identity import DefaultAzureCredential
 from azure.keyvault.secrets import SecretClient
 from azure.core.exceptions import ResourceNotFoundError
+
+@dataclass
+class EnvironmentConfig:
+    """Configuration for a BloodHound environment."""
+    tenant_domain: str
+    token_id: str
+    token_key: str
+    selected_environments: Optional[List[str]] = None
+
+@dataclass
+class AzureConfig:
+    """Azure-specific configuration."""
+    tenant_id: str
+    app_id: str
+    app_secret: str
+    dce_uri: str
+    dcr_immutable_id: str
+    table_name: str
+    key_vault_url: str
 
 def fetch_env_variables(required_vars):
     """
@@ -53,3 +74,65 @@ def get_token_lists(key_vault_url=None, token_ids_secret_name=None, token_keys_s
     else:
         logging.error("Insufficient information to fetch token IDs and keys from Key Vault.")
         raise ValueError("Insufficient information to fetch token IDs and keys from Key Vault.")
+
+def load_environment_configs(table_name: str) -> Tuple[List[EnvironmentConfig], AzureConfig]:
+    """
+    Load and validate environment configurations.
+    
+    Args:
+        table_name: Name of the table environment variable to use (e.g. 'AUDIT_LOGS_TABLE_NAME' or 'TIER_ZERO_ASSETS_TABLE_NAME')
+    
+    Returns:
+        Tuple containing list of BloodHound environment configs and Azure config
+    Raises:
+        KeyError: If required environment variables are missing
+        ValueError: If configuration validation fails
+    """
+    env_vars = fetch_env_variables([
+        "BLOODHOUND_TENANT_DOMAIN",
+        "BLOODHOUND_TOKEN_ID_SECRET_NAME",
+        "BLOODHOUND_TOKEN_KEY_SECRET_NAME",
+        "MICROSOFT_ENTRA_ID_APPLICATION_TENANT_ID",
+        "MICROSOFT_ENTRA_ID_APPLICATION_APP_ID",
+        "MICROSOFT_ENTRA_ID_APPLICATION_APP_SECRET",
+        "DCE_URI",
+        "DCR_IMMUTABLE_ID",
+        table_name,
+        "KEY_VAULT_URL",
+        "BLOODHOUND_TOKEN_ID",
+        "BLOODHOUND_TOKEN_KEY",
+        "SELECTED_BLOODHOUND_ENVIRONMENTS"
+    ])
+
+    # Parse environment configs
+    tenant_domains = [td.strip() for td in env_vars["BLOODHOUND_TENANT_DOMAIN"].split(',')]
+    
+    if env_vars["BLOODHOUND_TOKEN_ID"] and env_vars["BLOODHOUND_TOKEN_KEY"]:
+        token_ids = [tid.strip() for tid in env_vars["BLOODHOUND_TOKEN_ID"].split(',')]
+        token_keys = [tkey.strip() for tkey in env_vars["BLOODHOUND_TOKEN_KEY"].split(',')]
+    else:
+        token_ids, token_keys = get_token_lists(
+            key_vault_url=env_vars["KEY_VAULT_URL"],
+            token_ids_secret_name=env_vars["BLOODHOUND_TOKEN_ID_SECRET_NAME"],
+            token_keys_secret_name=env_vars["BLOODHOUND_TOKEN_KEY_SECRET_NAME"]
+        )
+
+    if not (len(tenant_domains) == len(token_ids) == len(token_keys)):
+        raise ValueError("Environment variable lists for domains, token IDs, and token keys have a mismatch in length")
+
+    env_configs = [
+        EnvironmentConfig(domain, tid, tkey)
+        for domain, tid, tkey in zip(tenant_domains, token_ids, token_keys)
+    ]
+
+    azure_config = AzureConfig(
+        tenant_id=env_vars["MICROSOFT_ENTRA_ID_APPLICATION_TENANT_ID"],
+        app_id=env_vars["MICROSOFT_ENTRA_ID_APPLICATION_APP_ID"],
+        app_secret=env_vars["MICROSOFT_ENTRA_ID_APPLICATION_APP_SECRET"],
+        dce_uri=env_vars["DCE_URI"],
+        dcr_immutable_id=env_vars["DCR_IMMUTABLE_ID"],
+        table_name=env_vars[table_name],
+        key_vault_url=env_vars["KEY_VAULT_URL"]
+    )
+
+    return env_configs, azure_config

@@ -215,7 +215,7 @@ def run_posture_history_collection_process(last_posture_history_timestamps=None)
             # Send collected data
             if all_collected_data:
                 send_posture_history_to_azure_monitor(
-                    all_collected_data[:200],
+                    all_collected_data,
                     bloodhound_manager,
                     azure_monitor_token,
                     current_tenant_domain,
