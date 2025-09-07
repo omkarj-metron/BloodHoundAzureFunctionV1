@@ -2,6 +2,7 @@ import logging
 import os
 import json
 import azure.functions as func
+from azure.core.exceptions import ResourceNotFoundError
 
 from ..SharedCode.azure_functions.posture_history_collector import run_posture_history_collection_process
 
@@ -34,24 +35,42 @@ def write_state(state):
         json.dump(state, f)
 
 def main(myTimer: func.TimerRequest) -> None:
+    """Main function for the posture history collector Azure Function."""
     logging.info("Timer triggered: bloodhound_posture_history_collector executed.")
 
-    if myTimer.past_due:
-        logging.warning("The timer trigger is past due!")
+    try:
+        if myTimer.past_due:
+            logging.info('The timer is past due!')
 
-    # Read previous state
-    state = read_state()
-    last_posture_history_timestamp = state.get("last_posture_history_timestamp", {})
+        logging.info("Starting bloodhound_posture_history_collector function.")
 
-    logging.info(f"Last posture history timestamp from state.json: {last_posture_history_timestamp}")
+        # Read previous state
+        state = read_state()
+        last_posture_history_timestamp = state.get("last_posture_history_timestamp", {})
+        logging.info(f"Last posture history timestamp from state.json: {last_posture_history_timestamp}")
 
-    # Call main function with last value
-    new_posture_history_timestamp = run_posture_history_collection_process(last_posture_history_timestamp)
-    logging.info(f"New posture history timestamp: {new_posture_history_timestamp}")
+        # Call main function with last value
+        new_posture_history_timestamp = run_posture_history_collection_process(last_posture_history_timestamp)
 
-    # Update state.json
-    state["last_posture_history_timestamp"] = new_posture_history_timestamp
-    write_state(state)
-    logging.info(f"State updated in state.json: {new_posture_history_timestamp}")
+        # If the function does not return a value, keep the old timestamp
+        if new_posture_history_timestamp is None:
+            logging.warning("Collection process did not return new timestamps. Keeping old values.")
+            new_posture_history_timestamp = last_posture_history_timestamp
 
-    logging.info("bloodhound_posture_history_collector execution finished.")
+        # Update state.json
+        state["last_posture_history_timestamp"] = new_posture_history_timestamp
+        write_state(state)
+        logging.info(f"State updated in state.json: {new_posture_history_timestamp}")
+
+    except KeyError as e:
+        logging.error(f"Missing one or more required environment variables: {e}")
+    except ValueError as e:
+        logging.error(f"Configuration error: {e}")
+    except ResourceNotFoundError as e:
+        logging.error(f"Azure Key Vault secret not found: {e}")
+    except json.JSONDecodeError as e:
+        logging.error(f"Error reading or writing state file: {e}")
+    except Exception as e:
+        logging.error(f"Unexpected error: {str(e)}", exc_info=True)
+    finally:
+        logging.info("bloodhound_posture_history_collector execution finished.")

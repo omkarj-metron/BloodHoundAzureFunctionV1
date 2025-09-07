@@ -28,7 +28,6 @@ class BloodhoundManager:
                 if response.content
                 else {"status": "success", "message": "No content in response"}
             )
-            self.logger.info(f"Successfully sent log entry to Azure Monitor. Response: {response_content}")
             return {"status": "success", "response": response_content}
         except requests.RequestException as e:
             self._log_error(
