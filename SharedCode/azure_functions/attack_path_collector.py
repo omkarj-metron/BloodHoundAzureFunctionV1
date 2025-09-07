@@ -105,7 +105,7 @@ def collect_attack_paths(
     domains: List[Dict[str, Any]],
     tenant_domain: str,
     last_attack_path_timestamps: Dict[str, Dict[str, str]],
-    default_lookback_days: int = 6
+    default_lookback_days: int = 1
 ) -> Tuple[List[Dict[str, Any]], Dict[str, str]]:
     """Collect attack paths for each domain and finding type."""
     all_collected_paths = []

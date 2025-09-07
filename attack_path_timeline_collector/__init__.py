@@ -34,26 +34,34 @@ def write_state(state):
         json.dump(state, f)
 
 def main(myTimer: func.TimerRequest) -> None:
-    logging.info("Timer triggered: attack_path_timeline_collector executed.")
+    try:
+        logging.info("Timer triggered: attack_path_timeline_collector executed.")
 
-    if myTimer.past_due:
-        logging.warning("The timer trigger is past due!")
+        if myTimer.past_due:
+            logging.warning("The timer trigger is past due!")
 
-    # Read previous state
-    state = read_state()
-    last_attack_path_timeline_timestamp = state.get("last_attack_path_timeline_timestamp", {})
+        # Read previous state
+        state = read_state()
+        last_attack_path_timeline_timestamp = state.get("last_attack_path_timeline_timestamp", {})
 
-    logging.info(f"Last attack path timeline timestamp from state.json: {last_attack_path_timeline_timestamp}")
+        logging.info(f"Last attack path timeline timestamp from state.json: {last_attack_path_timeline_timestamp}")
 
-    # Call main function with last value and capture new timestamp
-    print(f"type of last_attack_path_timeline_timestamp: {type(last_attack_path_timeline_timestamp)}")
-    print(f"last_attack_path_timeline_timestamp: {last_attack_path_timeline_timestamp}")
-    new_attack_path_timeline_timestamp = run_attack_paths_timeline_collection_process(last_attack_path_timeline_timestamp)
-    logging.info(f"New attack path timeline timestamp: {new_attack_path_timeline_timestamp}")
+        # Call main function with last value and capture new timestamp
+        new_attack_path_timeline_timestamp = run_attack_paths_timeline_collection_process(last_attack_path_timeline_timestamp)
+        
+        if new_attack_path_timeline_timestamp:
+            # Update state.json only if we got valid results
+            state["last_attack_path_timeline_timestamp"] = new_attack_path_timeline_timestamp
+            write_state(state)
+            logging.info(f"State updated in state.json: {new_attack_path_timeline_timestamp}")
+        else:
+            logging.warning("No new timestamps were collected. State remains unchanged.")
 
-    # Update state.json
-    state["last_attack_path_timeline_timestamp"] = new_attack_path_timeline_timestamp
-    write_state(state)
-    logging.info(f"State updated in state.json: {new_attack_path_timeline_timestamp}")
-
-    logging.info("attack_path_timeline_collector execution finished.")
+        logging.info("attack_path_timeline_collector execution finished.")
+        
+    except KeyError as e:
+        logging.error(f"Missing required environment variable: {e}")
+        raise
+    except Exception as e:
+        logging.error(f"Unexpected error in attack_path_timeline_collector: {str(e)}")
+        raise
