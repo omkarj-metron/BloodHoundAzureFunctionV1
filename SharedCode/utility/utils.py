@@ -13,6 +13,7 @@ class EnvironmentConfig:
     token_id: str
     token_key: str
     selected_environments: Optional[List[str]] = None
+    selected_finding_types: Optional[str] = None  # Can be "all" or comma-separated list
 
 @dataclass
 class AzureConfig:
@@ -101,7 +102,8 @@ def load_environment_configs(table_name: str) -> Tuple[List[EnvironmentConfig], 
         "KEY_VAULT_URL",
         "BLOODHOUND_TOKEN_ID",
         "BLOODHOUND_TOKEN_KEY",
-        "SELECTED_BLOODHOUND_ENVIRONMENTS"
+        "SELECTED_BLOODHOUND_ENVIRONMENTS",
+        "SELECTED_FINDING_TYPES"
     ])
 
     # Parse environment configs
@@ -120,8 +122,18 @@ def load_environment_configs(table_name: str) -> Tuple[List[EnvironmentConfig], 
     if not (len(tenant_domains) == len(token_ids) == len(token_keys)):
         raise ValueError("Environment variable lists for domains, token IDs, and token keys have a mismatch in length")
 
+    # Get the selected environments and finding types from environment variables
+    selected_environments = env_vars.get("SELECTED_BLOODHOUND_ENVIRONMENTS")
+    selected_finding_types = env_vars.get("SELECTED_FINDING_TYPES")
+
     env_configs = [
-        EnvironmentConfig(domain, tid, tkey)
+        EnvironmentConfig(
+            domain, 
+            tid, 
+            tkey,
+            selected_environments=selected_environments,
+            selected_finding_types=selected_finding_types
+        )
         for domain, tid, tkey in zip(tenant_domains, token_ids, token_keys)
     ]
 
