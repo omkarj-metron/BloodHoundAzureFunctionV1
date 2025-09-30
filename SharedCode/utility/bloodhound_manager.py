@@ -8,6 +8,13 @@ import datetime
 import json
 
 class BloodhoundManager:
+    """
+    Manages interactions with the BloodHound Enterprise API and Azure Monitor for
+    audit logs, finding trends, posture history, posture statistics, and attack paths.
+    """
+
+    DEFAULT_LOOKBACK_DAYS = 1
+    
     def _send_to_azure_monitor(self, log_entry, bearer_token, dce_uri, dcr_immutable_id, table_name):
         """
         Helper to send a log entry to Azure Monitor via Data Collection Endpoint (DCE).
@@ -18,28 +25,23 @@ class BloodhoundManager:
             "Authorization": f"Bearer {bearer_token}",
             "Content-Type": "application/json",
         }
-        try:
-            response = requests.post(
-                api_url, headers=headers, data=json.dumps([log_entry])
-            )
-            response.raise_for_status()
-            response_content = (
-                response.json()
-                if response.content
-                else {"status": "success", "message": "No content in response"}
-            )
-            return {"status": "success", "response": response_content}
-        except requests.RequestException as e:
-            self._log_error(
-                f"[Send Error] Failed to send log entry to Azure Monitor: {e}. Response: {getattr(e.response, 'text', 'N/A')}"
-            )
-            return {"status": "error", "message": str(e)}
-    """
-    Manages interactions with the BloodHound Enterprise API and Azure Monitor for
-    audit logs, finding trends, posture history, posture statistics, and attack paths.
-    """
 
-    DEFAULT_LOOKBACK_DAYS = 1
+        response = requests.post(
+            api_url, headers=headers, data=json.dumps([log_entry])
+        )
+        
+        if response.status_code >= 400:
+            self._log_error(
+                f"[Send Error] Failed to send log entry to Azure Monitor: HTTP {response.status_code}. Response: {response.text}"
+            )
+            return {"status": "error", "message": f"HTTP Error {response.status_code}"}
+
+        response_content = (
+            response.json()
+            if response.content
+            else {"status": "success", "message": "No content in response"}
+        )
+        return {"status": "success", "response": response_content}
 
     def __init__(
         self, tenant_domain: str, token_id: str, token_key: str, logger: logging.Logger
@@ -95,31 +97,27 @@ class BloodhoundManager:
 
     def _get_headers(self, method: str, uri: str, payload: str = None) -> dict:
         """Generate authentication headers for API requests"""
-        try:
-            # Use self.__token_key directly as it's already bytes
-            digester = hmac.new(self.__token_key, None, hashlib.sha256)
-            digester.update(f"{method}{uri}".encode())
-            digester = hmac.new(digester.digest(), None, hashlib.sha256)
-            datetime_formatted = datetime.datetime.now().astimezone().isoformat("T")
-            digester.update(datetime_formatted[:13].encode())
-            digester = hmac.new(digester.digest(), None, hashlib.sha256)
+        # Use self.__token_key directly as it's already bytes
+        digester = hmac.new(self.__token_key, None, hashlib.sha256)
+        digester.update(f"{method}{uri}".encode())
+        digester = hmac.new(digester.digest(), None, hashlib.sha256)
+        datetime_formatted = datetime.datetime.now().astimezone().isoformat("T")
+        digester.update(datetime_formatted[:13].encode())
+        digester = hmac.new(digester.digest(), None, hashlib.sha256)
 
-            # Process body if it exists separately and is a POST request
-            # Ensure the body is *only* included for the final hash for POST requests
-            if method == "POST" and payload:
-                digester.update(payload.encode())
+        # Process body if it exists separately and is a POST request
+        # Ensure the body is *only* included for the final hash for POST requests
+        if method == "POST" and payload:
+            digester.update(payload.encode())
 
-            headers = {
-                "User-Agent": "BloodHound Enterprise - Azure Functions Integration",
-                "Authorization": f"bhesignature {self.__token_id}",
-                "RequestDate": datetime_formatted,
-                "Signature": base64.b64encode(digester.digest()).decode(),
-                "Content-Type": "application/json",
-            }
-            return headers
-        except Exception as e:
-            self._log_error(f"Error generating headers: {e}")
-            return None
+        headers = {
+            "User-Agent": "BloodHound Enterprise - Azure Functions Integration",
+            "Authorization": f"bhesignature {self.__token_id}",
+            "RequestDate": datetime_formatted,
+            "Signature": base64.b64encode(digester.digest()).decode(),
+            "Content-Type": "application/json",
+        }
+        return headers
 
     def _validate_response(
         self, response: requests.Response, error_msg: str = "An error occurred"
@@ -127,14 +125,12 @@ class BloodhoundManager:
         """
         Validates the HTTP response and logs errors if any.
         """
-        try:
-            response.raise_for_status()
-            return True
-        except requests.HTTPError as error:
+        if response.status_code >= 400:
             self._log_error(
-                f"{error_msg}: {error} - Status Code: {response.status_code} - Response: {response.text}"
+                f"{error_msg}: HTTP Error - Status Code: {response.status_code} - Response: {response.text}"
             )
             return False
+        return True
 
     def _api_request(
         self, uri, return_json: bool = True, method: str = "GET", payload=None
@@ -151,33 +147,27 @@ class BloodhoundManager:
         Returns:
             Response data or None if request fails.
         """
-        try:
+        full_url: str = f"{self.tenant_domain}{uri}"
 
-            full_url: str = f"{self.tenant_domain}{uri}"
-
-            headers = self._get_headers(method, uri, payload)
-            if headers is None:
-                self.logger.error("Failed to generate headers for API request.")
-                return None
-
-            self.logger.info(f"Making {method} request to {full_url}")
-            response = requests.request(method, full_url, headers=headers, data=payload)
-            self.logger.info(f"Response status code: {response.status_code}")
-
-            if not self._validate_response(
-                response, f"API request to {full_url} failed"
-            ):
-                return None
-
-            # For text-based endpoints (like .md files), we return raw text, not JSON
-            if full_url.__contains__(".md") and return_json is False:
-                return response
-
-            return response.json() if return_json else response
-
-        except Exception as e:
-            self._log_error(f"Exception in _api_request for {full_url}: {e}")
+        headers = self._get_headers(method, uri, payload)
+        if headers is None:
+            self.logger.error("Failed to generate headers for API request.")
             return None
+
+        self.logger.info(f"Making {method} request to {full_url}")
+        response = requests.request(method, full_url, headers=headers, data=payload)
+        self.logger.info(f"Response status code: {response.status_code}")
+
+        if not self._validate_response(
+            response, f"API request to {full_url} failed"
+        ):
+            return None
+
+        # For text-based endpoints (like .md files), we return raw text, not JSON
+        if full_url.__contains__(".md") and return_json is False:
+            return response
+
+        return response.json() if return_json else response
 
     def test_connection(self) -> requests.Response | None:
         """
@@ -312,11 +302,7 @@ class BloodhoundManager:
             dict: Posture statistics for the specified domain, or None if an error occurs.
         """
         uri: str = "/api/v2/posture-stats"
-        try:
-            return self._api_request(uri)
-        except Exception as e:
-            self._log_error(f"Error fetching posture statistics data: {e}")
-            return None
+        return self._api_request(uri)
 
     def get_available_types_for_domain(self, domain_id: str) -> list:
         """
@@ -329,23 +315,17 @@ class BloodhoundManager:
             list: List of available types data, or empty list if failed.
         """
         self.logger.info(f"Fetching available types for domain ID: {domain_id}")
-        try:
-            uri: str = f"/api/v2/domains/{domain_id}/available-types"
-            # No change needed here, as domain_id is a path param, and no query params
-            response = self._api_request(uri)
-            if response:
-                self.logger.info(
-                    f"Found {len(response.get('data', []))} available types for domain ID: {domain_id}"
-                )
-                return response.get("data", [])
-            else:
-                self._log_error(
-                    f"Received empty response or request failed for available types for domain ID: {domain_id}."
-                )
-                return []
-        except Exception as e:
+        uri: str = f"/api/v2/domains/{domain_id}/available-types"
+        # No change needed here, as domain_id is a path param, and no query params
+        response = self._api_request(uri)
+        if response:
+            self.logger.info(
+                f"Found {len(response.get('data', []))} available types for domain ID: {domain_id}"
+            )
+            return response.get("data", [])
+        else:
             self._log_error(
-                f"Exception occurred while fetching available types for domain ID {domain_id}: {e}"
+                f"Received empty response or request failed for available types for domain ID: {domain_id}."
             )
             return []
 
@@ -363,49 +343,40 @@ class BloodhoundManager:
         self.logger.info(
             f"Fetching attack path details for domain ID: {domain_id}, finding type: {finding_type}"
         )
-        try:
-            all_attack_paths = []
-            skip = 0
-            page_size = 10  # Default page size for this endpoint if not specified
+        all_attack_paths = []
+        skip = 0
+        page_size = 10  # Default page size for this endpoint if not specified
 
-            while True:
-                # Fetch a page of attack path details
-                # domain_id is a path parameter
-                # 'finding' and 'skip' are query parameters
+        while True:
+            # Fetch a page of attack path details
+            # domain_id is a path parameter
+            # 'finding' and 'skip' are query parameters
 
-                page_data = self._api_request(
-                    f"/api/v2/domains/{domain_id}/details?finding={finding_type}&skip={skip}"
-                )
-
-                if not page_data or not page_data.get("data"):
-                    break  # No more data or error occurred
-
-                current_page_items = page_data.get("data", [])
-                all_attack_paths.extend(current_page_items)
-
-                self.logger.debug(
-                    f"Fetched {len(current_page_items)} items for skip={skip}, total={len(all_attack_paths)}"
-                )
-
-                # Check if this was the last page
-                if (
-                    len(current_page_items) < page_size
-                ):  # If fetched fewer than max, must be last page
-                    break
-
-                # Increment skip for the next page
-                skip += len(current_page_items)
-
-            self.logger.info(
-                f"Finished fetching attack path details for domain ID: {domain_id}, finding type: {finding_type}. Total items: {len(all_attack_paths)}"
+            page_data = self._api_request(
+                f"/api/v2/domains/{domain_id}/details?finding={finding_type}&skip={skip}"
             )
-            return all_attack_paths
 
-        except Exception as e:
-            self._log_error(
-                f"Error fetching attack path details for {domain_id} with type {finding_type}: {e}"
+            if not page_data or not page_data.get("data"):
+                break  # No more data or error occurred
+
+            current_page_items = page_data.get("data", [])
+            all_attack_paths.extend(current_page_items)
+
+            self.logger.debug(
+                f"Fetched {len(current_page_items)} items for skip={skip}, total={len(all_attack_paths)}"
             )
-            return []
+
+            # Check if this was the last page
+            if len(current_page_items) < page_size:  # If fetched fewer than max, must be last page
+                break
+
+            # Increment skip for the next page
+            skip += len(current_page_items)
+
+        self.logger.info(
+            f"Finished fetching attack path details for domain ID: {domain_id}, finding type: {finding_type}. Total items: {len(all_attack_paths)}"
+        )
+        return all_attack_paths
 
     def get_attack_path_sparkline_timeline(
         self, domain_id: str, finding_type: str, start_from = ""
@@ -423,35 +394,29 @@ class BloodhoundManager:
         self.logger.info(
             f"Fetching attack path timeline for domain {domain_id} and finding type {finding_type}."
         )
-        try:
-            if start_from is not None and start_from != "":
-                uri: str = f"/api/v2/domains/{domain_id}/sparkline?finding={finding_type}&from={start_from}"
-            else:
-                two_days_ago_midnight = (
-                    (datetime.datetime.now() - datetime.timedelta(days=self.DEFAULT_LOOKBACK_DAYS))
-                    .replace(hour=0, minute=0, second=0, microsecond=0)
-                    .strftime('%Y-%m-%dT%H:%M:%SZ')
-                )
-                uri: str = f"/api/v2/domains/{domain_id}/sparkline?finding={finding_type}&from={two_days_ago_midnight}"
-
-            page_data = self._api_request(
-                uri
+        if start_from is not None and start_from != "":
+            uri: str = f"/api/v2/domains/{domain_id}/sparkline?finding={finding_type}&from={start_from}"
+        else:
+            two_days_ago_midnight = (
+                (datetime.datetime.now() - datetime.timedelta(days=self.DEFAULT_LOOKBACK_DAYS))
+                .replace(hour=0, minute=0, second=0, microsecond=0)
+                .strftime('%Y-%m-%dT%H:%M:%SZ')
             )
+            uri: str = f"/api/v2/domains/{domain_id}/sparkline?finding={finding_type}&from={two_days_ago_midnight}"
 
-            # The API response for sparkline might sometimes just be the list directly,
-            # or wrapped in 'data'. Handle both.
-            if isinstance(page_data, dict) and "data" in page_data:
-                return page_data.get("data", [])
-            elif isinstance(page_data, list):
-                return page_data
-            else:
-                self._log_error(
-                    f"Unexpected response format for attack path timeline for {domain_id} with type {finding_type}: {page_data}"
-                )
-                return []
-        except Exception as e:
+        page_data = self._api_request(
+            uri
+        )
+
+        # The API response for sparkline might sometimes just be the list directly,
+        # or wrapped in 'data'. Handle both.
+        if isinstance(page_data, dict) and "data" in page_data:
+            return page_data.get("data", [])
+        elif isinstance(page_data, list):
+            return page_data
+        else:
             self._log_error(
-                f"Error fetching attack path timeline for {domain_id} with type {finding_type}: {e}"
+                f"Unexpected response format for attack path timeline for {domain_id} with type {finding_type}: {page_data}"
             )
             return []
 
@@ -464,18 +429,14 @@ class BloodhoundManager:
         Returns:
             str: The text content, or an empty string if fetching fails.
         """
-        try:
-            # No change needed here, finding_type is a path param, no query params
-            response = self._api_request(uri, return_json=False)
-            if response and response.status_code == 200:
-                return response.text
-            else:
-                self._log_error(
-                    f"Failed to fetch data. Status: {response.status_code if response else 'No response'}"
-                )
-                return ""
-        except Exception as e:
-            self._log_error(f"Error fetching data: {e}")
+        # No change needed here, finding_type is a path param, no query params
+        response = self._api_request(uri, return_json=False)
+        if response and response.status_code == 200:
+            return response.text
+        else:
+            self._log_error(
+                f"Failed to fetch data. Status: {response.status_code if response else 'No response'}"
+            )
             return ""
 
     # NEW METHOD: get_all_path_asset_details_for_finding_types
@@ -552,20 +513,15 @@ class BloodhoundManager:
         body = f"client_id={self.app_id}&scope=https%3A%2F%2Fmonitor.azure.com%2F%2F.default&client_secret={self.app_secret}&grant_type=client_credentials"
 
         self.logger.info("Attempting to obtain Bearer token for Azure Monitor.")
-        try:
-            response = requests.post(token_url, headers=headers, data=body)
-            response.raise_for_status()
-            access_token = response.json().get("access_token")
-            if access_token:
-                self.logger.info("Bearer token obtained successfully.")
-            else:
-                self._log_error(f"Bearer token not found in response: {response.text}")
-            return access_token
-        except requests.RequestException as e:
-            self._log_error(
-                f"Error fetching Bearer token: {e} - Response: {getattr(e.response, 'text', 'N/A')}"
-            )
-            return None
+
+        response = requests.post(token_url, headers=headers, data=body)
+        response.raise_for_status()
+        access_token = response.json().get("access_token")
+        if access_token:
+            self.logger.info("Bearer token obtained successfully.")
+        else:
+            self._log_error(f"Bearer token not found in response: {response.text}")
+        return access_token
 
     def send_audit_logs_data(self, data: dict, bearer_token: str) -> dict:
         """

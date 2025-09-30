@@ -139,8 +139,10 @@ def collect_attack_paths(
                 
                 if not last_saved_ts:
                     last_saved_ts = (
-                        datetime.datetime.utcnow() - datetime.timedelta(days=default_lookback_days)
-                    ).isoformat() + "Z"
+                        (datetime.datetime.now() - datetime.timedelta(days=default_lookback_days))
+                        .replace(hour=0, minute=0, second=0, microsecond=0)
+                        .strftime('%Y-%m-%dT%H:%M:%SZ')
+                    )
 
                 if item_updated_at > last_saved_ts:
                     all_collected_paths.append(data_item)

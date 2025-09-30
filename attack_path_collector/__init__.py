@@ -10,24 +10,23 @@ from ..SharedCode.azure_functions.attack_path_collector import run_attack_paths_
 STATE_FILE = os.path.join(os.path.dirname(__file__), "state.json")
 
 def read_state():
-    """Read the state from state.json. Return {} if file is empty or invalid."""
+    """
+    Read the state from state.json. Return {} if file does not exist or is empty.
+    
+    Note: This function does not handle exceptions. The caller is responsible for
+    catching and logging any errors that occur during file I/O or JSON decoding.
+    """
     if not os.path.exists(STATE_FILE):
         with open(STATE_FILE, "w") as f:
             json.dump({}, f)
         return {}
 
-    try:
-        with open(STATE_FILE, "r") as f:
-            content = f.read().strip()
-            if not content:
-                logging.warning("state.json is empty. Initializing with {}.")
-                return {}
-            return json.loads(content)
-    except (json.JSONDecodeError, ValueError) as e:
-        logging.warning(f"state.json is invalid ({e}). Resetting to empty dict.")
-        with open(STATE_FILE, "w") as f:
-            json.dump({}, f)
-        return {}
+    with open(STATE_FILE, "r") as f:
+        content = f.read().strip()
+        if not content:
+            logging.warning("state.json is empty. Initializing with {}.")
+            return {}
+        return json.loads(content)
 
 def write_state(state):
     """Write updated state to state.json"""

@@ -47,23 +47,22 @@ def fetch_key_vault_secrets(key_vault_url, token_ids_secret_name, token_keys_sec
     """
     Fetches token IDs and token keys from Azure Key Vault.
     Returns two lists: all_token_ids, all_token_keys.
-    Raises and logs errors if secrets are missing or retrieval fails.
+    
+    Note: This function does not handle exceptions. The caller is responsible for
+    catching and logging any errors that occur during secret retrieval.
     """
-    try:
-        credential = DefaultAzureCredential()
-        secret_client = SecretClient(vault_url=key_vault_url, credential=credential)
-        token_ids = secret_client.get_secret(token_ids_secret_name).value
-        token_keys = secret_client.get_secret(token_keys_secret_name).value
-        all_token_ids = [token_id.strip() for token_id in token_ids.split(',')]
-        all_token_keys = [token_key.strip() for token_key in token_keys.split(',')]
-        logging.info("Successfully retrieved all API tokens from Azure Key Vault.")
-        return all_token_ids, all_token_keys
-    except ResourceNotFoundError as e:
-        logging.error(f"One or more secrets not found in Azure Key Vault: {e}. Ensure all secrets exist. Exiting process.")
-        raise
-    except Exception as e:
-        logging.error(f"An unexpected error occurred while retrieving secrets from Azure Key Vault: {e}. Exiting process.")
-        raise
+    credential = DefaultAzureCredential()
+    secret_client = SecretClient(vault_url=key_vault_url, credential=credential)
+    
+    token_ids = secret_client.get_secret(token_ids_secret_name).value
+    token_keys = secret_client.get_secret(token_keys_secret_name).value
+    
+    all_token_ids = [token_id.strip() for token_id in token_ids.split(',')]
+    all_token_keys = [token_key.strip() for token_key in token_keys.split(',')]
+    
+    logging.info("Successfully retrieved all API tokens from Azure Key Vault.")
+    
+    return all_token_ids, all_token_keys
 
 def get_token_lists(key_vault_url=None, token_ids_secret_name=None, token_keys_secret_name=None):
     """
@@ -100,8 +99,8 @@ def load_environment_configs(table_name: str) -> Tuple[List[EnvironmentConfig], 
         "DCR_IMMUTABLE_ID",
         table_name,
         "KEY_VAULT_URL",
-        # "BLOODHOUND_TOKEN_ID",
-        # "BLOODHOUND_TOKEN_KEY",
+        "BLOODHOUND_TOKEN_ID",
+        "BLOODHOUND_TOKEN_KEY",
         "SELECTED_BLOODHOUND_ENVIRONMENTS",
         "SELECTED_FINDING_TYPES"
     ])
@@ -109,21 +108,21 @@ def load_environment_configs(table_name: str) -> Tuple[List[EnvironmentConfig], 
     # Parse environment configs
     tenant_domains = [td.strip() for td in env_vars["BLOODHOUND_TENANT_DOMAIN"].split(',')]
     
-    # if env_vars["BLOODHOUND_TOKEN_ID"] and env_vars["BLOODHOUND_TOKEN_KEY"]:
-    #     token_ids = [tid.strip() for tid in env_vars["BLOODHOUND_TOKEN_ID"].split(',')]
-    #     token_keys = [tkey.strip() for tkey in env_vars["BLOODHOUND_TOKEN_KEY"].split(',')]
-    # else:
-    #     token_ids, token_keys = get_token_lists(
-    #         key_vault_url=env_vars["KEY_VAULT_URL"],
-    #         token_ids_secret_name=env_vars["BLOODHOUND_TOKEN_ID_SECRET_NAME"],
-    #         token_keys_secret_name=env_vars["BLOODHOUND_TOKEN_KEY_SECRET_NAME"]
-    #     )
-
-    token_ids, token_keys = get_token_lists(
+    if env_vars["BLOODHOUND_TOKEN_ID"] and env_vars["BLOODHOUND_TOKEN_KEY"]:
+        token_ids = [tid.strip() for tid in env_vars["BLOODHOUND_TOKEN_ID"].split(',')]
+        token_keys = [tkey.strip() for tkey in env_vars["BLOODHOUND_TOKEN_KEY"].split(',')]
+    else:
+        token_ids, token_keys = get_token_lists(
             key_vault_url=env_vars["KEY_VAULT_URL"],
             token_ids_secret_name=env_vars["BLOODHOUND_TOKEN_ID_SECRET_NAME"],
             token_keys_secret_name=env_vars["BLOODHOUND_TOKEN_KEY_SECRET_NAME"]
         )
+
+    # token_ids, token_keys = get_token_lists(
+    #         key_vault_url=env_vars["KEY_VAULT_URL"],
+    #         token_ids_secret_name=env_vars["BLOODHOUND_TOKEN_ID_SECRET_NAME"],
+    #         token_keys_secret_name=env_vars["BLOODHOUND_TOKEN_KEY_SECRET_NAME"]
+    #     )
 
     if not (len(tenant_domains) == len(token_ids) == len(token_keys)):
         raise ValueError("Environment variable lists for domains, token IDs, and token keys have a mismatch in length")
