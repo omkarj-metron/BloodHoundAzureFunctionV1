@@ -99,8 +99,8 @@ def load_environment_configs(table_name: str) -> Tuple[List[EnvironmentConfig], 
         "DCR_IMMUTABLE_ID",
         table_name,
         "KEY_VAULT_URL",
-        "BLOODHOUND_TOKEN_ID",
-        "BLOODHOUND_TOKEN_KEY",
+        # "BLOODHOUND_TOKEN_ID",
+        # "BLOODHOUND_TOKEN_KEY",
         "SELECTED_BLOODHOUND_ENVIRONMENTS",
         "SELECTED_FINDING_TYPES"
     ])
@@ -108,21 +108,21 @@ def load_environment_configs(table_name: str) -> Tuple[List[EnvironmentConfig], 
     # Parse environment configs
     tenant_domains = [td.strip() for td in env_vars["BLOODHOUND_TENANT_DOMAIN"].split(',')]
     
-    if env_vars["BLOODHOUND_TOKEN_ID"] and env_vars["BLOODHOUND_TOKEN_KEY"]:
-        token_ids = [tid.strip() for tid in env_vars["BLOODHOUND_TOKEN_ID"].split(',')]
-        token_keys = [tkey.strip() for tkey in env_vars["BLOODHOUND_TOKEN_KEY"].split(',')]
-    else:
-        token_ids, token_keys = get_token_lists(
-            key_vault_url=env_vars["KEY_VAULT_URL"],
-            token_ids_secret_name=env_vars["BLOODHOUND_TOKEN_ID_SECRET_NAME"],
-            token_keys_secret_name=env_vars["BLOODHOUND_TOKEN_KEY_SECRET_NAME"]
-        )
-
-    # token_ids, token_keys = get_token_lists(
+    # if env_vars["BLOODHOUND_TOKEN_ID"] and env_vars["BLOODHOUND_TOKEN_KEY"]:
+    #     token_ids = [tid.strip() for tid in env_vars["BLOODHOUND_TOKEN_ID"].split(',')]
+    #     token_keys = [tkey.strip() for tkey in env_vars["BLOODHOUND_TOKEN_KEY"].split(',')]
+    # else:
+    #     token_ids, token_keys = get_token_lists(
     #         key_vault_url=env_vars["KEY_VAULT_URL"],
     #         token_ids_secret_name=env_vars["BLOODHOUND_TOKEN_ID_SECRET_NAME"],
     #         token_keys_secret_name=env_vars["BLOODHOUND_TOKEN_KEY_SECRET_NAME"]
     #     )
+
+    token_ids, token_keys = get_token_lists(
+            key_vault_url=env_vars["KEY_VAULT_URL"],
+            token_ids_secret_name=env_vars["BLOODHOUND_TOKEN_ID_SECRET_NAME"],
+            token_keys_secret_name=env_vars["BLOODHOUND_TOKEN_KEY_SECRET_NAME"]
+        )
 
     if not (len(tenant_domains) == len(token_ids) == len(token_keys)):
         raise ValueError("Environment variable lists for domains, token IDs, and token keys have a mismatch in length")
