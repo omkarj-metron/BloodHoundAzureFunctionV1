@@ -5,6 +5,7 @@ from typing import Dict, List, Tuple, Optional, Any
 from azure.identity import DefaultAzureCredential
 from azure.keyvault.secrets import SecretClient
 from azure.core.exceptions import ResourceNotFoundError
+from .constant import DEFAULT_LOOKBACK_DAYS
 
 @dataclass
 class EnvironmentConfig:
@@ -153,3 +154,11 @@ def load_environment_configs(table_name: str) -> Tuple[List[EnvironmentConfig], 
     )
 
     return env_configs, azure_config
+
+def get_lookup_days():
+    """
+    Fetch the LOOKUP_DAYS value from the environment variable.
+    If not set, fallback to the DEFAULT_LOOKBACK_DAYS from the constant file.
+    """
+    lookup_days = int(os.getenv("LOOKUP_DAYS", DEFAULT_LOOKBACK_DAYS))
+    return lookup_days

@@ -3,7 +3,7 @@ import time
 import datetime
 from typing import Dict, List, Tuple, Optional, Any
 from dataclasses import dataclass
-from ..utility.utils import load_environment_configs, EnvironmentConfig, AzureConfig
+from ..utility.utils import load_environment_configs, EnvironmentConfig, AzureConfig, get_lookup_days
 from ..utility.bloodhound_manager import BloodhoundManager
 
 @dataclass
@@ -104,12 +104,12 @@ def collect_attack_paths(
     bloodhound_manager: BloodhoundManager,
     domains: List[Dict[str, Any]],
     tenant_domain: str,
-    last_attack_path_timestamps: Dict[str, Dict[str, str]],
-    default_lookback_days: int = 1
+    last_attack_path_timestamps: Dict[str, Dict[str, str]]
 ) -> Tuple[List[Dict[str, Any]], Dict[str, str]]:
     """Collect attack paths for each domain and finding type."""
     all_collected_paths = []
     domain_latest_timestamps = {}
+    default_lookback_days = get_lookup_days()
 
     for domain in domains:
         domain_id = domain.get("id")

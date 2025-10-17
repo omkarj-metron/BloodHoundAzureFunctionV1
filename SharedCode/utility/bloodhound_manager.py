@@ -6,14 +6,13 @@ import base64
 from urllib.parse import urljoin, urlparse, urlencode, parse_qs
 import datetime
 import json
+from .utils import get_lookup_days
 
 class BloodhoundManager:
     """
     Manages interactions with the BloodHound Enterprise API and Azure Monitor for
     audit logs, finding trends, posture history, posture statistics, and attack paths.
     """
-
-    DEFAULT_LOOKBACK_DAYS = 1
     
     def _send_to_azure_monitor(self, log_entry, bearer_token, dce_uri, dcr_immutable_id, table_name):
         """
@@ -72,6 +71,8 @@ class BloodhoundManager:
         self.table_name = (
             None  # This will store the *current* table name for send operations
         )
+
+        self.lookup_days = get_lookup_days()
 
     def set_azure_monitor_config(
         self,
@@ -213,7 +214,7 @@ class BloodhoundManager:
                 uri: str = f"/api/v2/audit?skip={skip}&limit={limit}&after={after}"
             else:
                 two_days_ago_midnight = (
-                    (datetime.datetime.now() - datetime.timedelta(days=self.DEFAULT_LOOKBACK_DAYS))
+                    (datetime.datetime.now() - datetime.timedelta(days=self.lookup_days))
                     .replace(hour=0, minute=0, second=0, microsecond=0)
                     .strftime('%Y-%m-%dT%H:%M:%SZ')
                 )
@@ -286,7 +287,7 @@ class BloodhoundManager:
             uri: str = f"/api/v2/posture-history/{data_type}?environments={environment_id}&start={start}"
         else:
             two_days_ago_midnight = (
-                (datetime.datetime.now() - datetime.timedelta(days=self.DEFAULT_LOOKBACK_DAYS))
+                (datetime.datetime.now() - datetime.timedelta(days=self.lookup_days))
                 .replace(hour=0, minute=0, second=0, microsecond=0)
                 .strftime('%Y-%m-%dT%H:%M:%SZ')
             )
@@ -398,7 +399,7 @@ class BloodhoundManager:
             uri: str = f"/api/v2/domains/{domain_id}/sparkline?finding={finding_type}&from={start_from}"
         else:
             two_days_ago_midnight = (
-                (datetime.datetime.now() - datetime.timedelta(days=self.DEFAULT_LOOKBACK_DAYS))
+                (datetime.datetime.now() - datetime.timedelta(days=self.lookup_days))
                 .replace(hour=0, minute=0, second=0, microsecond=0)
                 .strftime('%Y-%m-%dT%H:%M:%SZ')
             )
