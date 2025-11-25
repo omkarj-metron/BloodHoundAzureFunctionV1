@@ -1,7 +1,7 @@
 import logging
 import time
 from typing import Dict, List, Any, Optional
-from ..utility.utils import load_environment_configs, get_token_lists
+from ..utility.utils import load_environment_configs, get_token_lists, get_azure_batch_size
 from ..utility.bloodhound_manager import BloodhoundManager
 
 
@@ -168,9 +168,8 @@ def send_posture_history_to_azure_monitor(posture_history_data, bloodhound_manag
         logging.info("No posture history data was collected to send to Azure Monitor for this environment.")
         return successful_submissions, failed_submissions
 
-    logging.info(f"Sending {len(posture_history_data)} posture history records to Azure Monitor in batches of 100.")
-    
-    batch_size = 100
+    batch_size = get_azure_batch_size()
+    logging.info(f"Sending {len(posture_history_data)} posture history records to Azure Monitor in batches of {batch_size}.")
     
     # Process in batches
     for batch_start in range(0, len(posture_history_data), batch_size):

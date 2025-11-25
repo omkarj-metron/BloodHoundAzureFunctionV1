@@ -162,3 +162,33 @@ def get_lookup_days():
     """
     lookup_days = int(os.getenv("LOOKUP_DAYS", DEFAULT_LOOKBACK_DAYS))
     return lookup_days
+
+def get_api_page_size():
+    """
+    Fetch the API_PAGE_SIZE value from the environment variable.
+    Used for pagination when fetching data from BloodHound API (audit logs, attack paths).
+    Default: 1000
+    Maximum: 1000 (values > 1000 will be capped at 1000)
+    """
+    page_size = int(os.getenv("API_PAGE_SIZE", "1000"))
+    return min(page_size, 1000)
+
+def get_azure_batch_size():
+    """
+    Fetch the AZURE_BATCH_SIZE value from the environment variable.
+    Used for batching when sending data to Azure Monitor.
+    Default: 100
+    Maximum: 100 (values > 100 will be capped at 100)
+    """
+    batch_size = int(os.getenv("AZURE_BATCH_SIZE", "100"))
+    return min(batch_size, 100)
+
+def get_max_retries():
+    """
+    Fetch the MAX_RETRIES value from the environment variable.
+    Used for retrying failed API requests (rate limit errors).
+    Default: 9
+    Maximum: 9 (values > 9 will be capped at 9)
+    """
+    max_retries = int(os.getenv("MAX_RETRIES", "9"))
+    return min(max_retries, 9)

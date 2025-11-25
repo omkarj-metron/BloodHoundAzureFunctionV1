@@ -5,7 +5,7 @@ import json
 from azure.core.exceptions import ResourceNotFoundError
 
 from ..utility.utils import (
-    load_environment_configs
+    load_environment_configs, get_azure_batch_size
 )
 from ..utility.bloodhound_manager import BloodhoundManager
 
@@ -27,9 +27,8 @@ def send_tier_zero_assets_to_azure_monitor(
         logging.info("No Tier Zero Assets data to send to Azure Monitor for this environment.")
         return successful_submissions, failed_submissions
 
-    logging.info(f"Sending {len(nodes_array)} Tier Zero Assets to Azure Monitor in batches of 100.")
-    
-    batch_size = 100
+    batch_size = get_azure_batch_size()
+    logging.info(f"Sending {len(nodes_array)} Tier Zero Assets to Azure Monitor in batches of {batch_size}.")
     
     # Process in batches
     for batch_start in range(0, len(nodes_array), batch_size):

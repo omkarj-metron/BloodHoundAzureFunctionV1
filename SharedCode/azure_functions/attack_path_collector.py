@@ -4,7 +4,7 @@ import datetime
 import json
 from typing import Dict, List, Tuple, Optional, Any
 from dataclasses import dataclass
-from ..utility.utils import load_environment_configs, EnvironmentConfig, AzureConfig, get_lookup_days
+from ..utility.utils import load_environment_configs, EnvironmentConfig, AzureConfig, get_lookup_days, get_azure_batch_size
 from ..utility.bloodhound_manager import BloodhoundManager
 
 @dataclass
@@ -223,7 +223,7 @@ def send_attack_paths_to_azure_monitor(
     """Send collected attack paths to Azure Monitor in batches."""
     successful_submissions = 0
     failed_submissions = 0
-    batch_size = 100  # Send 100 entries per batch (Azure Monitor has 1 MB limit)
+    batch_size = get_azure_batch_size()
 
     if not attack_paths:
         logging.info("No attack path details to send to Azure Monitor.")

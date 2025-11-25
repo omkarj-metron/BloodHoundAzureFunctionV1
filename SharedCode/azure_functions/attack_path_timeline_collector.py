@@ -1,7 +1,7 @@
 import logging
 import time
 import datetime
-from ..utility.utils import load_environment_configs
+from ..utility.utils import load_environment_configs, get_azure_batch_size
 from ..utility.bloodhound_manager import BloodhoundManager
 
 
@@ -189,7 +189,7 @@ def process_environment(bloodhound_manager, env_config, tenant_domain, last_time
         logging.error("Failed to obtain Bearer token for Azure Monitor.")
         return last_timestamps
     
-    batch_size = 100  # Send 100 entries per batch (Azure Monitor has 1 MB limit)
+    batch_size = get_azure_batch_size()
     logging.info(f"Sending {len(consolidated_timeline)} attack path timeline records to Azure Monitor in batches of {batch_size}.")
     
     successful_submissions = 0

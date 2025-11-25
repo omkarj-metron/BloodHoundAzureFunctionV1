@@ -8,7 +8,7 @@ import datetime
 import json
 import time
 import random
-from .utils import get_lookup_days
+from .utils import get_lookup_days, get_api_page_size, get_max_retries
 
 
 class RateLimiter:
@@ -109,7 +109,7 @@ class BloodhoundManager:
     audit logs, finding trends, posture history, posture statistics, and attack paths.
     """
     
-    def _send_to_azure_monitor(self, log_entry, bearer_token, dce_uri, dcr_immutable_id, table_name, max_retries: int = 3):
+    def _send_to_azure_monitor(self, log_entry, bearer_token, dce_uri, dcr_immutable_id, table_name, max_retries: int = None):
         """
         Helper to send log entry(ies) to Azure Monitor via Data Collection Endpoint (DCE).
         Handles POST request, error handling, logging, and rate limiting.
@@ -120,8 +120,11 @@ class BloodhoundManager:
             dce_uri: Data Collection Endpoint URI
             dcr_immutable_id: Data Collection Rule immutable ID
             table_name: Table name for the log entries
-            max_retries: Maximum number of retries for rate limit errors
+            max_retries: Maximum number of retries for rate limit errors (default: from env var MAX_RETRIES, max 10)
         """
+        if max_retries is None:
+            max_retries = get_max_retries()
+        
         api_url = f"{dce_uri}/dataCollectionRules/{dcr_immutable_id}/streams/Custom-{table_name}?api-version=2023-01-01"
         headers = {
             "Authorization": f"Bearer {bearer_token}",
@@ -275,7 +278,7 @@ class BloodhoundManager:
         return True
 
     def _api_request(
-        self, uri, return_json: bool = True, method: str = "GET", payload=None, max_retries: int = 3
+        self, uri, return_json: bool = True, method: str = "GET", payload=None, max_retries: int = None
     ):
         """
         Centralized function to handle API requests and error handling with rate limiting.
@@ -284,11 +287,14 @@ class BloodhoundManager:
             method (str): HTTP method (GET, POST, etc.)
             return_json (bool): Whether to return JSON response or raw response
             payload: Request payload for POST requests
-            max_retries: Maximum number of retries for rate limit errors
+            max_retries: Maximum number of retries for rate limit errors (default: from env var MAX_RETRIES, max 10)
 
         Returns:
             Response data or None if request fails.
         """
+        if max_retries is None:
+            max_retries = get_max_retries()
+        
         full_url: str = f"{self.tenant_domain}{uri}"
         
         for attempt in range(max_retries + 1):
@@ -380,7 +386,7 @@ class BloodhoundManager:
         """
         audit_logs_list: list = []
         skip: int = 0
-        limit = 1000
+        limit = get_api_page_size()
         while True:
 
             if after is not None and after != "":
@@ -519,7 +525,7 @@ class BloodhoundManager:
         )
         all_attack_paths = []
         skip = 0
-        page_size = 1000  # Increased page size to reduce number of API calls
+        page_size = get_api_page_size()
 
         while True:
             # Fetch a page of attack path details

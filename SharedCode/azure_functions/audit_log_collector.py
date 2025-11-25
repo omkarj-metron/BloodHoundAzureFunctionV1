@@ -2,7 +2,7 @@ from typing import Dict, List, Tuple, Optional, Any
 import logging
 import time
 import json
-from ..utility.utils import load_environment_configs, EnvironmentConfig, AzureConfig
+from ..utility.utils import load_environment_configs, EnvironmentConfig, AzureConfig, get_azure_batch_size
 from ..utility.bloodhound_manager import BloodhoundManager
 
 def process_environment(
@@ -142,9 +142,8 @@ def send_audit_logs_to_azure_monitor(
         Exception: If there's an error sending logs to Azure Monitor
     """
     successful_submissions = failed_submissions = 0
-    logging.info(f"Processing {len(audit_logs)} audit logs for '{current_tenant_domain}' in batches of 100")
-    
-    batch_size = 100
+    batch_size = get_azure_batch_size()
+    logging.info(f"Processing {len(audit_logs)} audit logs for '{current_tenant_domain}' in batches of {batch_size}")
     
     # Process in batches
     for batch_start in range(0, len(audit_logs), batch_size):

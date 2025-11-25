@@ -7,7 +7,8 @@ from dataclasses import dataclass
 from ..utility.utils import (
     EnvironmentConfig,
     AzureConfig,
-    load_environment_configs
+    load_environment_configs,
+    get_azure_batch_size
 )
 from ..utility.bloodhound_manager import BloodhoundManager
 
@@ -47,9 +48,8 @@ def send_finding_trends_to_azure_monitor(
         logging.info("No finding trends to send to Azure Monitor for this environment")
         return successful_submissions, failed_submissions
 
-    logging.info(f"Sending {len(findings)} collected finding trends to Azure Monitor in batches of 100.")
-    
-    batch_size = 100
+    batch_size = get_azure_batch_size()
+    logging.info(f"Sending {len(findings)} collected finding trends to Azure Monitor in batches of {batch_size}.")
     
     # Process in batches
     for batch_start in range(0, len(findings), batch_size):
