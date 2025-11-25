@@ -6,7 +6,102 @@ import base64
 from urllib.parse import urljoin, urlparse, urlencode, parse_qs
 import datetime
 import json
+import time
+import random
 from .utils import get_lookup_days
+
+
+class RateLimiter:
+    """
+    Dynamic rate limiter that adjusts delays based on rate limit errors.
+    Handles exponential backoff with jitter and Retry-After headers.
+    """
+    
+    def __init__(self, logger: logging.Logger, initial_delay: float = 0.1, max_delay: float = 60.0):
+        """
+        Initialize the rate limiter.
+        
+        Args:
+            logger: Logger instance for logging
+            initial_delay: Initial delay in seconds (default: 0.1)
+            max_delay: Maximum delay in seconds (default: 60.0)
+        """
+        self.logger = logger
+        self.initial_delay = initial_delay
+        self.max_delay = max_delay
+        self.current_delay = initial_delay
+        self.consecutive_429s = 0
+        self.last_request_time = {}
+        
+    def wait(self, api_name: str = "default"):
+        """
+        Wait before making a request, using current delay.
+        
+        Args:
+            api_name: Name of the API (e.g., "bloodhound", "azure_monitor")
+        """
+        if api_name in self.last_request_time:
+            elapsed = time.time() - self.last_request_time[api_name]
+            if elapsed < self.current_delay:
+                sleep_time = self.current_delay - elapsed
+                time.sleep(sleep_time)
+        
+        self.last_request_time[api_name] = time.time()
+    
+    def handle_rate_limit(self, response: requests.Response = None, api_name: str = "default"):
+        """
+        Handle rate limit error (429) by adjusting delay.
+        
+        Args:
+            response: HTTP response object (may contain Retry-After header)
+            api_name: Name of the API
+        """
+        self.consecutive_429s += 1
+        
+        # Check for Retry-After header
+        retry_after = None
+        if response and 'Retry-After' in response.headers:
+            try:
+                retry_after = int(response.headers['Retry-After'])
+                self.logger.info(f"Rate limit detected for {api_name}. Retry-After header: {retry_after} seconds")
+            except ValueError:
+                pass
+        
+        if retry_after:
+            # Use Retry-After value with some jitter
+            self.current_delay = min(retry_after + random.uniform(0, 2), self.max_delay)
+        else:
+            # Exponential backoff with jitter: delay = initial_delay * (2 ^ consecutive_429s) + jitter
+            base_delay = self.initial_delay * (2 ** min(self.consecutive_429s, 10))  # Cap at 2^10
+            jitter = random.uniform(0, base_delay * 0.1)  # 10% jitter
+            self.current_delay = min(base_delay + jitter, self.max_delay)
+        
+        self.logger.warning(
+            f"Rate limit error for {api_name}. "
+            f"Adjusting delay to {self.current_delay:.2f} seconds. "
+            f"Consecutive 429s: {self.consecutive_429s}"
+        )
+        
+        return self.current_delay
+    
+    def handle_success(self, api_name: str = "default"):
+        """
+        Handle successful request by gradually reducing delay.
+        
+        Args:
+            api_name: Name of the API
+        """
+        if self.consecutive_429s > 0:
+            # Gradually reduce delay on success
+            self.current_delay = max(
+                self.current_delay * 0.8,  # Reduce by 20%
+                self.initial_delay  # Don't go below initial delay
+            )
+            self.consecutive_429s = max(0, self.consecutive_429s - 1)
+            
+            if self.consecutive_429s == 0:
+                self.logger.info(f"Rate limit recovered for {api_name}. Delay reset to {self.current_delay:.2f} seconds")
+
 
 class BloodhoundManager:
     """
@@ -14,10 +109,18 @@ class BloodhoundManager:
     audit logs, finding trends, posture history, posture statistics, and attack paths.
     """
     
-    def _send_to_azure_monitor(self, log_entry, bearer_token, dce_uri, dcr_immutable_id, table_name):
+    def _send_to_azure_monitor(self, log_entry, bearer_token, dce_uri, dcr_immutable_id, table_name, max_retries: int = 3):
         """
-        Helper to send a log entry to Azure Monitor via Data Collection Endpoint (DCE).
-        Handles POST request, error handling, and logging.
+        Helper to send log entry(ies) to Azure Monitor via Data Collection Endpoint (DCE).
+        Handles POST request, error handling, logging, and rate limiting.
+        
+        Args:
+            log_entry: Single log entry dict OR list of log entry dicts for batching
+            bearer_token: Azure Monitor bearer token
+            dce_uri: Data Collection Endpoint URI
+            dcr_immutable_id: Data Collection Rule immutable ID
+            table_name: Table name for the log entries
+            max_retries: Maximum number of retries for rate limit errors
         """
         api_url = f"{dce_uri}/dataCollectionRules/{dcr_immutable_id}/streams/Custom-{table_name}?api-version=2023-01-01"
         headers = {
@@ -25,22 +128,56 @@ class BloodhoundManager:
             "Content-Type": "application/json",
         }
 
-        response = requests.post(
-            api_url, headers=headers, data=json.dumps([log_entry])
-        )
-        
-        if response.status_code >= 400:
-            self._log_error(
-                f"[Send Error] Failed to send log entry to Azure Monitor: HTTP {response.status_code}. Response: {response.text}"
-            )
-            return {"status": "error", "message": f"HTTP Error {response.status_code}"}
+        # Handle both single entry and batch (list of entries)
+        if isinstance(log_entry, list):
+            log_entries = log_entry
+        else:
+            log_entries = [log_entry]
 
-        response_content = (
-            response.json()
-            if response.content
-            else {"status": "success", "message": "No content in response"}
-        )
-        return {"status": "success", "response": response_content}
+        for attempt in range(max_retries + 1):
+            # Wait before making request (rate limiting)
+            self.azure_monitor_rate_limiter.wait("azure_monitor")
+            
+            response = requests.post(
+                api_url, headers=headers, data=json.dumps(log_entries)
+            )
+            
+            # Handle rate limit (429)
+            if response.status_code == 429:
+                if attempt < max_retries:
+                    delay = self.azure_monitor_rate_limiter.handle_rate_limit(response, "azure_monitor")
+                    self.logger.warning(
+                        f"Azure Monitor rate limited. Waiting {delay:.2f} seconds before retry "
+                        f"(attempt {attempt + 1}/{max_retries + 1})..."
+                    )
+                    time.sleep(delay)
+                    continue
+                else:
+                    self._log_error(
+                        f"[Send Error] Rate limit error after {max_retries} retries. "
+                        f"Failed to send {len(log_entries)} log entry(ies) to Azure Monitor."
+                    )
+                    return {"status": "error", "message": f"Rate limit error after {max_retries} retries"}
+            
+            # Handle other errors
+            if response.status_code >= 400:
+                self._log_error(
+                    f"[Send Error] Failed to send {len(log_entries)} log entry(ies) to Azure Monitor: "
+                    f"HTTP {response.status_code}. Response: {response.text}"
+                )
+                return {"status": "error", "message": f"HTTP Error {response.status_code}"}
+            
+            # Success - reset rate limiter
+            self.azure_monitor_rate_limiter.handle_success("azure_monitor")
+
+            response_content = (
+                response.json()
+                if response.content
+                else {"status": "success", "message": "No content in response"}
+            )
+            return {"status": "success", "response": response_content, "entries_sent": len(log_entries)}
+        
+        return {"status": "error", "message": "Failed after all retries"}
 
     def __init__(
         self, tenant_domain: str, token_id: str, token_key: str, logger: logging.Logger
@@ -73,6 +210,10 @@ class BloodhoundManager:
         )
 
         self.lookup_days = get_lookup_days()
+        
+        # Initialize rate limiters for different APIs
+        self.bloodhound_rate_limiter = RateLimiter(logger, initial_delay=0.1, max_delay=60.0)
+        self.azure_monitor_rate_limiter = RateLimiter(logger, initial_delay=0.1, max_delay=60.0)
 
     def set_azure_monitor_config(
         self,
@@ -134,41 +275,73 @@ class BloodhoundManager:
         return True
 
     def _api_request(
-        self, uri, return_json: bool = True, method: str = "GET", payload=None
+        self, uri, return_json: bool = True, method: str = "GET", payload=None, max_retries: int = 3
     ):
         """
-        Centralized function to handle API requests and error handling.
+        Centralized function to handle API requests and error handling with rate limiting.
 
         Args:
             method (str): HTTP method (GET, POST, etc.)
-            endpoint_key (str): Key in ENDPOINTS dictionary
             return_json (bool): Whether to return JSON response or raw response
-            **kwargs: Includes parameters for URL path formatting, query parameters, and post body.
+            payload: Request payload for POST requests
+            max_retries: Maximum number of retries for rate limit errors
 
         Returns:
             Response data or None if request fails.
         """
         full_url: str = f"{self.tenant_domain}{uri}"
+        
+        for attempt in range(max_retries + 1):
+            # Wait before making request (rate limiting)
+            self.bloodhound_rate_limiter.wait("bloodhound")
+            
+            headers = self._get_headers(method, uri, payload)
+            if headers is None:
+                self.logger.error("Failed to generate headers for API request.")
+                return None
 
-        headers = self._get_headers(method, uri, payload)
-        if headers is None:
-            self.logger.error("Failed to generate headers for API request.")
-            return None
+            self.logger.info(f"Making {method} request to {full_url} (attempt {attempt + 1}/{max_retries + 1})")
+            
+            # For POST requests with payload, ensure it's sent as bytes
+            # Keep payload as string for signature calculation, but encode when sending
+            if method == "POST" and payload:
+                if isinstance(payload, str):
+                    response = requests.request(method, full_url, headers=headers, data=payload.encode('utf-8'))
+                else:
+                    response = requests.request(method, full_url, headers=headers, data=payload)
+            else:
+                response = requests.request(method, full_url, headers=headers, data=payload)
+            
+            self.logger.info(f"Response status code: {response.status_code}")
 
-        self.logger.info(f"Making {method} request to {full_url}")
-        response = requests.request(method, full_url, headers=headers, data=payload)
-        self.logger.info(f"Response status code: {response.status_code}")
+            # Handle rate limit (429)
+            if response.status_code == 429:
+                if attempt < max_retries:
+                    delay = self.bloodhound_rate_limiter.handle_rate_limit(response, "bloodhound")
+                    self.logger.warning(f"Rate limited. Waiting {delay:.2f} seconds before retry...")
+                    time.sleep(delay)
+                    continue
+                else:
+                    self._log_error(f"Rate limit error after {max_retries} retries: {full_url}")
+                    return None
+            
+            # Handle other errors
+            if response.status_code >= 400:
+                self._log_error(
+                    f"API request to {full_url} failed: HTTP Error - Status Code: {response.status_code} - Response: {response.text}"
+                )
+                return None
+            
+            # Success - reset rate limiter
+            self.bloodhound_rate_limiter.handle_success("bloodhound")
 
-        if not self._validate_response(
-            response, f"API request to {full_url} failed"
-        ):
-            return None
+            # For text-based endpoints (like .md files), we return raw text, not JSON
+            if full_url.__contains__(".md") and return_json is False:
+                return response
 
-        # For text-based endpoints (like .md files), we return raw text, not JSON
-        if full_url.__contains__(".md") and return_json is False:
-            return response
-
-        return response.json() if return_json else response
+            return response.json() if return_json else response
+        
+        return None
 
     def test_connection(self) -> requests.Response | None:
         """
@@ -346,15 +519,15 @@ class BloodhoundManager:
         )
         all_attack_paths = []
         skip = 0
-        page_size = 10  # Default page size for this endpoint if not specified
+        page_size = 1000  # Increased page size to reduce number of API calls
 
         while True:
             # Fetch a page of attack path details
             # domain_id is a path parameter
-            # 'finding' and 'skip' are query parameters
+            # 'finding', 'skip', and 'limit' are query parameters
 
             page_data = self._api_request(
-                f"/api/v2/domains/{domain_id}/details?finding={finding_type}&skip={skip}"
+                f"/api/v2/domains/{domain_id}/details?finding={finding_type}&skip={skip}&limit={page_size}"
             )
 
             if not page_data or not page_data.get("data"):
