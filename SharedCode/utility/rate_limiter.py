@@ -135,7 +135,7 @@ class GlobalRateLimiter:
                     if now - self.last_rate_log_time >= self.rate_log_interval:
                         requests_in_last_second = len([ts for ts in self.request_timestamps if ts > now - 1.0])
                         self.logger.info(
-                            f"📊 Rate Limiter Stats: {requests_in_last_second} requests/second "
+                            f"Rate Limiter Stats: {requests_in_last_second} requests/second "
                             f"(Limit: {self.max_requests_per_second}/sec) | "
                             f"Total requests: {self.total_requests} | "
                             f"Available tokens: {self.current_tokens:.2f}/{self.max_tokens:.2f}"
