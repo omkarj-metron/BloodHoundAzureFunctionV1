@@ -9,6 +9,7 @@ import json
 import time
 import random
 from .utils import get_lookup_days, get_api_page_size, get_max_retries
+from .rate_limiter import get_global_rate_limiter
 
 
 class RateLimiter:
@@ -214,8 +215,10 @@ class BloodhoundManager:
 
         self.lookup_days = get_lookup_days()
         
-        # Initialize rate limiters for different APIs
-        self.bloodhound_rate_limiter = RateLimiter(logger, initial_delay=0.1, max_delay=60.0)
+        # Use global rate limiter for BloodHound API (shared across all instances)
+        self.bloodhound_rate_limiter = get_global_rate_limiter(logger=logger)
+        
+        # Keep instance-based rate limiter for Azure Monitor (different API)
         self.azure_monitor_rate_limiter = RateLimiter(logger, initial_delay=0.1, max_delay=60.0)
 
     def set_azure_monitor_config(
@@ -298,8 +301,8 @@ class BloodhoundManager:
         full_url: str = f"{self.tenant_domain}{uri}"
         
         for attempt in range(max_retries + 1):
-            # Wait before making request (rate limiting)
-            self.bloodhound_rate_limiter.wait("bloodhound")
+            # Wait before making request (rate limiting) - uses global rate limiter
+            self.bloodhound_rate_limiter.wait()
             
             headers = self._get_headers(method, uri, payload)
             if headers is None:
@@ -320,11 +323,22 @@ class BloodhoundManager:
             
             self.logger.info(f"Response status code: {response.status_code}")
 
-            # Handle rate limit (429)
+            # Handle rate limit (429) - should rarely happen with proactive rate limiting
             if response.status_code == 429:
                 if attempt < max_retries:
-                    delay = self.bloodhound_rate_limiter.handle_rate_limit(response, "bloodhound")
-                    self.logger.warning(f"Rate limited. Waiting {delay:.2f} seconds before retry...")
+                    # If we hit 429, wait longer and reduce rate temporarily
+                    retry_after = None
+                    if 'Retry-After' in response.headers:
+                        try:
+                            retry_after = int(response.headers['Retry-After'])
+                        except ValueError:
+                            pass
+                    
+                    delay = retry_after if retry_after else min(2.0 * (attempt + 1), 60.0)
+                    self.logger.warning(
+                        f"Rate limit (429) encountered despite rate limiter. "
+                        f"Waiting {delay:.2f} seconds before retry (attempt {attempt + 1}/{max_retries + 1})..."
+                    )
                     time.sleep(delay)
                     continue
                 else:
@@ -338,8 +352,7 @@ class BloodhoundManager:
                 )
                 return None
             
-            # Success - reset rate limiter
-            self.bloodhound_rate_limiter.handle_success("bloodhound")
+            # Success - global rate limiter handles success automatically via token consumption
 
             # For text-based endpoints (like .md files), we return raw text, not JSON
             if full_url.__contains__(".md") and return_json is False:
