@@ -142,8 +142,9 @@ class BloodhoundManager:
             # Wait before making request (rate limiting)
             self.azure_monitor_rate_limiter.wait("azure_monitor")
             
+            # Set timeout to prevent hanging (30 seconds connect, 60 seconds read)
             response = requests.post(
-                api_url, headers=headers, data=json.dumps(log_entries)
+                api_url, headers=headers, data=json.dumps(log_entries), timeout=(30, 60)
             )
             
             # Handle rate limit (429)
@@ -268,14 +269,25 @@ class BloodhoundManager:
         return headers
 
     def _validate_response(
-        self, response: requests.Response, error_msg: str = "An error occurred"
+        self, response: requests.Response, error_msg: str = "An error occurred",
+        method: str = None, url: str = None
     ) -> bool:
         """
         Validates the HTTP response and logs errors if any.
+        
+        Args:
+            response: HTTP response object
+            error_msg: Error message to log
+            method: HTTP method (optional, for better logging)
+            url: Full URL (optional, for better logging)
         """
         if response.status_code >= 400:
             self._log_error(
-                f"{error_msg}: HTTP Error - Status Code: {response.status_code} - Response: {response.text}"
+                error_msg,
+                method=method,
+                url=url or response.url if hasattr(response, 'url') else None,
+                status_code=response.status_code,
+                response_text=response.text
             )
             return False
         return True
@@ -301,25 +313,85 @@ class BloodhoundManager:
         full_url: str = f"{self.tenant_domain}{uri}"
         
         for attempt in range(max_retries + 1):
-            # Wait before making request (rate limiting) - uses global rate limiter
-            self.bloodhound_rate_limiter.wait()
+            try:
+                # Wait before making request (rate limiting) - uses global rate limiter
+                self.bloodhound_rate_limiter.wait()
+            except Exception:
+                self._log_error(
+                    "Rate limiter error before API request",
+                    method=method,
+                    url=full_url,
+                    exc_info=True
+                )
+                return None
             
             headers = self._get_headers(method, uri, payload)
             if headers is None:
-                self.logger.error("Failed to generate headers for API request.")
+                self._log_error(
+                    "Failed to generate headers for API request",
+                    method=method,
+                    url=full_url
+                )
                 return None
 
             self.logger.info(f"Making {method} request to {full_url} (attempt {attempt + 1}/{max_retries + 1})")
             
-            # For POST requests with payload, ensure it's sent as bytes
-            # Keep payload as string for signature calculation, but encode when sending
-            if method == "POST" and payload:
-                if isinstance(payload, str):
-                    response = requests.request(method, full_url, headers=headers, data=payload.encode('utf-8'))
+            try:
+                # For POST requests with payload, ensure it's sent as bytes
+                # Keep payload as string for signature calculation, but encode when sending
+                # Set timeout to prevent hanging (30 seconds connect, 60 seconds read)
+                timeout = (30, 60)
+                if method == "POST" and payload:
+                    if isinstance(payload, str):
+                        response = requests.request(method, full_url, headers=headers, data=payload.encode('utf-8'), timeout=timeout)
+                    else:
+                        response = requests.request(method, full_url, headers=headers, data=payload, timeout=timeout)
                 else:
-                    response = requests.request(method, full_url, headers=headers, data=payload)
-            else:
-                response = requests.request(method, full_url, headers=headers, data=payload)
+                    response = requests.request(method, full_url, headers=headers, data=payload, timeout=timeout)
+            except requests.exceptions.Timeout as e:
+                self._log_error(
+                    f"Request timeout error",
+                    method=method,
+                    url=full_url,
+                    exc_info=True
+                )
+                if attempt < max_retries:
+                    self.logger.info(f"Retrying after timeout (attempt {attempt + 1}/{max_retries + 1})...")
+                    time.sleep(min(2.0 * (attempt + 1), 10.0))
+                    continue
+                return None
+            except requests.exceptions.ConnectionError as e:
+                self._log_error(
+                    f"Connection error - unable to reach server",
+                    method=method,
+                    url=full_url,
+                    exc_info=True
+                )
+                if attempt < max_retries:
+                    self.logger.info(f"Retrying after connection error (attempt {attempt + 1}/{max_retries + 1})...")
+                    time.sleep(min(2.0 * (attempt + 1), 10.0))
+                    continue
+                return None
+            except requests.exceptions.RequestException as e:
+                self._log_error(
+                    f"Request exception: {str(e)}",
+                    method=method,
+                    url=full_url,
+                    exc_info=True
+                )
+                if attempt < max_retries:
+                    self.logger.info(f"Retrying after request exception (attempt {attempt + 1}/{max_retries + 1})...")
+                    time.sleep(min(2.0 * (attempt + 1), 10.0))
+                    continue
+                return None
+            except Exception as e:
+                self._log_error(
+                    f"Unexpected error during API request: {type(e).__name__}: {str(e)}",
+                    method=method,
+                    url=full_url,
+                    exc_info=True
+                )
+                return None
             
             self.logger.info(f"Response status code: {response.status_code}")
 
@@ -337,28 +409,59 @@ class BloodhoundManager:
                     delay = retry_after if retry_after else min(2.0 * (attempt + 1), 60.0)
                     self.logger.warning(
                         f"Rate limit (429) encountered despite rate limiter. "
+                        f"Method: {method} | URL: {full_url} | "
                         f"Waiting {delay:.2f} seconds before retry (attempt {attempt + 1}/{max_retries + 1})..."
                     )
                     time.sleep(delay)
                     continue
                 else:
-                    self._log_error(f"Rate limit error after {max_retries} retries: {full_url}")
+                    self._log_error(
+                        f"Rate limit error after {max_retries} retries",
+                        method=method,
+                        url=full_url,
+                        status_code=429,
+                        response_text=response.text
+                    )
                     return None
             
-            # Handle other errors
+            # Handle other HTTP errors
             if response.status_code >= 400:
                 self._log_error(
-                    f"API request to {full_url} failed: HTTP Error - Status Code: {response.status_code} - Response: {response.text}"
+                    f"API request failed with HTTP error",
+                    method=method,
+                    url=full_url,
+                    status_code=response.status_code,
+                    response_text=response.text
                 )
                 return None
             
             # Success - global rate limiter handles success automatically via token consumption
+            try:
+                # For text-based endpoints (like .md files), we return raw text, not JSON
+                if full_url.__contains__(".md") and return_json is False:
+                    return response
 
-            # For text-based endpoints (like .md files), we return raw text, not JSON
-            if full_url.__contains__(".md") and return_json is False:
-                return response
-
-            return response.json() if return_json else response
+                return response.json() if return_json else response
+            except ValueError as e:
+                # JSON decode error
+                self._log_error(
+                    f"Failed to parse JSON response",
+                    method=method,
+                    url=full_url,
+                    status_code=response.status_code,
+                    response_text=response.text[:500] if response.text else "No response body",
+                    exc_info=True
+                )
+                return None
+            except Exception as e:
+                self._log_error(
+                    f"Unexpected error processing response: {type(e).__name__}: {str(e)}",
+                    method=method,
+                    url=full_url,
+                    status_code=response.status_code,
+                    exc_info=True
+                )
+                return None
         
         return None
 
@@ -380,7 +483,9 @@ class BloodhoundManager:
         Fetches available domains from the BloodHound Enterprise API.
         """
         self.logger.info("Fetching available domains from BloodHound API...")
-        response = self._api_request("/api/v2/available-domains", return_json=True)
+        uri = "/api/v2/available-domains"
+        full_url = f"{self.tenant_domain}{uri}"
+        response = self._api_request(uri, return_json=True)
         
         if isinstance(response, dict):
             self.logger.info(
@@ -388,7 +493,11 @@ class BloodhoundManager:
             )
             return response
         else:
-            self._log_error(f"Expected dict from API, got {type(response)}: {response}")
+            self._log_error(
+                f"Expected dict from API, got {type(response)}: {response}",
+                method="GET",
+                url=full_url
+            )
             return {}
 
     def get_audit_logs(self, after = "") -> list[dict] :
@@ -509,6 +618,7 @@ class BloodhoundManager:
         """
         self.logger.info(f"Fetching available types for domain ID: {domain_id}")
         uri: str = f"/api/v2/domains/{domain_id}/available-types"
+        full_url = f"{self.tenant_domain}{uri}"
         # No change needed here, as domain_id is a path param, and no query params
         response = self._api_request(uri)
         if response:
@@ -518,7 +628,9 @@ class BloodhoundManager:
             return response.get("data", [])
         else:
             self._log_error(
-                f"Received empty response or request failed for available types for domain ID: {domain_id}."
+                f"Received empty response or request failed for available types for domain ID: {domain_id}",
+                method="GET",
+                url=full_url
             )
             return []
 
@@ -622,13 +734,18 @@ class BloodhoundManager:
         Returns:
             str: The text content, or an empty string if fetching fails.
         """
+        full_url = f"{self.tenant_domain}{uri}"
         # No change needed here, finding_type is a path param, no query params
         response = self._api_request(uri, return_json=False)
         if response and response.status_code == 200:
             return response.text
         else:
             self._log_error(
-                f"Failed to fetch data. Status: {response.status_code if response else 'No response'}"
+                f"Failed to fetch data",
+                method="GET",
+                url=full_url,
+                status_code=response.status_code if response else None,
+                response_text=response.text if response else "No response"
             )
             return ""
 
@@ -682,11 +799,34 @@ class BloodhoundManager:
         )
         return all_asset_details
 
-    def _log_error(self, message: str):
+    def _log_error(self, message: str, method: str = None, url: str = None, 
+                   status_code: int = None, response_text: str = None, exc_info: bool = False):
         """
-        Logs the provided error message using the logger.
+        Logs error messages with comprehensive context.
+        
+        Args:
+            message: Error message
+            method: HTTP method (GET, POST, etc.)
+            url: Full URL of the failed request
+            status_code: HTTP status code if available
+            response_text: Response body text if available
+            exc_info: Whether to include exception traceback
         """
-        self.logger.error(message)
+        error_details = [message]
+        
+        if method:
+            error_details.append(f"Method: {method}")
+        if url:
+            error_details.append(f"URL: {url}")
+        if status_code:
+            error_details.append(f"Status Code: {status_code}")
+        if response_text:
+            # Truncate long responses to avoid log bloat
+            truncated_response = response_text[:500] + "..." if len(response_text) > 500 else response_text
+            error_details.append(f"Response: {truncated_response}")
+        
+        full_message = " | ".join(error_details)
+        self.logger.error(full_message, exc_info=exc_info)
 
     def get_bearer_token(self) -> str | None:
         """
@@ -707,7 +847,8 @@ class BloodhoundManager:
 
         self.logger.info("Attempting to obtain Bearer token for Azure Monitor.")
 
-        response = requests.post(token_url, headers=headers, data=body)
+        # Set timeout to prevent hanging (30 seconds connect, 60 seconds read)
+        response = requests.post(token_url, headers=headers, data=body, timeout=(30, 60))
         response.raise_for_status()
         access_token = response.json().get("access_token")
         if access_token:

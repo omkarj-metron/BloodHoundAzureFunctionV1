@@ -72,17 +72,26 @@ class GlobalRateLimiter:
     
     def _refill_tokens(self):
         """Refill tokens based on elapsed time since last refill."""
-        now = time.time()
-        elapsed = now - self.last_refill_time
-        
-        if elapsed > 0:
-            # Add tokens based on refill rate
-            tokens_to_add = elapsed * self.tokens_per_second
-            self.current_tokens = min(
-                self.max_tokens,
-                self.current_tokens + tokens_to_add
+        try:
+            now = time.time()
+            elapsed = now - self.last_refill_time
+            
+            if elapsed > 0:
+                # Add tokens based on refill rate
+                tokens_to_add = elapsed * self.tokens_per_second
+                self.current_tokens = min(
+                    self.max_tokens,
+                    self.current_tokens + tokens_to_add
+                )
+                self.last_refill_time = now
+        except Exception as e:
+            self.logger.error(
+                f"Rate limiter error in _refill_tokens(): {type(e).__name__}: {str(e)}",
+                exc_info=True
             )
-            self.last_refill_time = now
+            # Reset to safe state on error
+            self.last_refill_time = time.time()
+            raise
     
     def acquire(self, timeout: Optional[float] = None) -> bool:
         """
@@ -133,24 +142,68 @@ class GlobalRateLimiter:
                 self._lock.release()
                 try:
                     time.sleep(wait_time)
+                except Exception as e:
+                    self.logger.error(
+                        f"Rate limiter error during sleep: {type(e).__name__}: {str(e)}",
+                        exc_info=True
+                    )
+                    raise
                 finally:
-                    self._lock.acquire()
+                    try:
+                        self._lock.acquire()
+                    except Exception as e:
+                        self.logger.error(
+                            f"Rate limiter error re-acquiring lock: {type(e).__name__}: {str(e)}",
+                            exc_info=True
+                        )
+                        raise
     
     def wait(self):
         """
         Wait until a token is available, then consume it.
         This is the main method to call before making an API request.
+        
+        Raises:
+            RuntimeError: If token acquisition fails unexpectedly
         """
-        self.acquire()
+        try:
+            if not self.acquire():
+                raise RuntimeError(
+                    "Rate limiter failed to acquire token. This should not happen "
+                    "with default timeout=None (infinite wait)."
+                )
+        except Exception as e:
+            self.logger.error(
+                f"Rate limiter error in wait(): {type(e).__name__}: {str(e)}",
+                exc_info=True
+            )
+            raise
     
-    def get_stats(self) -> dict:
+    def get_stats(self, timeout: Optional[float] = 5.0) -> dict:
         """
         Get statistics about rate limiter usage.
         
+        Args:
+            timeout: Maximum time to wait for lock acquisition (default: 5 seconds)
+        
         Returns:
             dict: Statistics including total requests, average wait time, etc.
+                  Returns empty dict with error message if lock cannot be acquired.
         """
-        with self._lock:
+        # Try to acquire lock with timeout
+        if not self._lock.acquire(timeout=timeout):
+            self.logger.warning(
+                f"Could not acquire lock for get_stats() within {timeout}s. "
+                "Returning partial stats without lock."
+            )
+            # Return stats that don't require lock (immutable values)
+            return {
+                "error": "Lock acquisition timeout",
+                "max_requests_per_second": self.max_requests_per_second,
+                "tokens_per_second": self.tokens_per_second,
+            }
+        
+        try:
             avg_wait_time = (
                 self.total_wait_time / self.total_requests
                 if self.total_requests > 0
@@ -164,12 +217,31 @@ class GlobalRateLimiter:
                 "max_requests_per_second": self.max_requests_per_second,
                 "tokens_per_second": self.tokens_per_second,
             }
+        finally:
+            self._lock.release()
     
-    def reset_stats(self):
-        """Reset statistics counters."""
-        with self._lock:
+    def reset_stats(self, timeout: Optional[float] = 5.0):
+        """
+        Reset statistics counters.
+        
+        Args:
+            timeout: Maximum time to wait for lock acquisition (default: 5 seconds)
+        
+        Returns:
+            bool: True if stats were reset, False if lock acquisition failed
+        """
+        if not self._lock.acquire(timeout=timeout):
+            self.logger.warning(
+                f"Could not acquire lock for reset_stats() within {timeout}s."
+            )
+            return False
+        
+        try:
             self.total_requests = 0
             self.total_wait_time = 0.0
+            return True
+        finally:
+            self._lock.release()
 
 
 # Convenience function to get the global rate limiter instance

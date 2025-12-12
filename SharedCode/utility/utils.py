@@ -201,5 +201,5 @@ def get_max_requests_per_second():
     Recommended: Keep between 40-55 to provide safety margin
     """
     max_rps = float(os.getenv("BLOODHOUND_MAX_REQUESTS_PER_SECOND", "50.0"))
-    # Cap at 60 to ensure we never exceed the 65 limit
-    return min(max_rps, 60.0)
+    # Cap at 50 to ensure we never exceed the 65 limit
+    return min(max_rps, 50.0)
