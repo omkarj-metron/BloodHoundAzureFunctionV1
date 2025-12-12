@@ -113,9 +113,7 @@ def send_finding_trends_to_azure_monitor(
             failed_submissions += len(log_entries)
             logging.error(f"Failed to send batch: {result.get('message', 'Unknown error') if result else 'No response'}")
         
-        # Rate limiting between batches
-        if batch_end < len(findings):
-            time.sleep(0.1)
+        # Rate limiting is handled automatically by azure_monitor_rate_limiter in _send_to_azure_monitor()
 
     logging.info(
         f"Finding trends processing for '{current_tenant_domain}' complete. Successful: {successful_submissions}, Failed: {failed_submissions}."

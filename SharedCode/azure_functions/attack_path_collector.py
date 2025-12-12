@@ -269,9 +269,7 @@ def send_attack_paths_to_azure_monitor(
             failed_submissions += len(log_entries)
             logging.error(f"Failed to send batch: {result.get('message', 'Unknown error')}")
         
-        # Rate limiting between batches
-        if batch_end < len(attack_paths):
-            time.sleep(0.1)
+        # Rate limiting is handled automatically by azure_monitor_rate_limiter in _send_to_azure_monitor()
 
     logging.info(f"Attack path sending complete. Successful: {successful_submissions}, Failed: {failed_submissions}")
     return successful_submissions, failed_submissions

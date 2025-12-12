@@ -233,9 +233,7 @@ def process_environment(bloodhound_manager, env_config, tenant_domain, last_time
             failed_submissions += len(log_entries)
             logging.error(f"Failed to send batch: {result.get('message', 'Unknown error')}")
         
-        # Rate limiting between batches
-        if batch_end < len(consolidated_timeline):
-            time.sleep(0.1)
+        # Rate limiting is handled automatically by azure_monitor_rate_limiter in _send_to_azure_monitor()
     
     logging.info(f"Attack path timeline sending complete. Successful: {successful_submissions}, Failed: {failed_submissions}")
     return last_timestamps
