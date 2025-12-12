@@ -42,6 +42,11 @@ class GlobalRateLimiter:
         self.total_requests = 0
         self.total_wait_time = 0.0
         
+        # Request rate tracking (for per-second logging)
+        self.request_timestamps = []  # Store timestamps of recent requests
+        self.last_rate_log_time = time.time()
+        self.rate_log_interval = 1.0  # Log rate every 1 second
+        
         self.logger.info(
             f"GlobalRateLimiter initialized: {max_requests_per_second} requests/second "
             f"(max tokens: {self.max_tokens})"
@@ -117,6 +122,25 @@ class GlobalRateLimiter:
                     self.total_requests += 1
                     wait_time = time.time() - start_time
                     self.total_wait_time += wait_time
+                    
+                    # Track request timestamp for rate calculation
+                    now = time.time()
+                    self.request_timestamps.append(now)
+                    
+                    # Clean old timestamps (keep only last 5 seconds)
+                    cutoff_time = now - 5.0
+                    self.request_timestamps = [ts for ts in self.request_timestamps if ts > cutoff_time]
+                    
+                    # Log requests per second periodically (WARNING level = yellow)
+                    if now - self.last_rate_log_time >= self.rate_log_interval:
+                        requests_in_last_second = len([ts for ts in self.request_timestamps if ts > now - 1.0])
+                        self.logger.info(
+                            f"📊 Rate Limiter Stats: {requests_in_last_second} requests/second "
+                            f"(Limit: {self.max_requests_per_second}/sec) | "
+                            f"Total requests: {self.total_requests} | "
+                            f"Available tokens: {self.current_tokens:.2f}/{self.max_tokens:.2f}"
+                        )
+                        self.last_rate_log_time = now
                     
                     if wait_time > 0.01:  # Log if we had to wait more than 10ms
                         self.logger.debug(

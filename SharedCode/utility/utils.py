@@ -195,11 +195,11 @@ def get_max_retries():
 
 def get_max_requests_per_second():
     """
-    Fetch the BLOODHOUND_MAX_REQUESTS_PER_SECOND value from the environment variable.
+    Fetch the MAX_REQUESTS_PER_SECOND_LIMIT value from the environment variable.
     Used for global rate limiting of BloodHound API requests.
     Default: 50.0 (well under the 65 requests/second limit)
     Recommended: Keep between 40-55 to provide safety margin
     """
-    max_rps = float(os.getenv("BLOODHOUND_MAX_REQUESTS_PER_SECOND", "50.0"))
+    max_rps = float(os.getenv("MAX_REQUESTS_PER_SECOND_LIMIT", "50.0"))
     # Cap at 50 to ensure we never exceed the 65 limit
     return min(max_rps, 50.0)
