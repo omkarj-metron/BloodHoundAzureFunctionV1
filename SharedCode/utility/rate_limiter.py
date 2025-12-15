@@ -123,15 +123,46 @@ class GlobalRateLimiter:
                 # Refill tokens
                 self._refill_tokens()
                 
+                # Enforce minimum time between requests to prevent exceeding rate limit
+                min_time_between_requests = 1.0 / self.max_requests_per_second
+                now = time.time()
+                
+                # Check if we need to wait based on last request time
+                if self.request_timestamps:
+                    time_since_last_request = now - self.request_timestamps[-1]
+                    if time_since_last_request < min_time_between_requests:
+                        # Need to wait to enforce rate limit
+                        wait_needed = min_time_between_requests - time_since_last_request
+                        self._lock.release()
+                        try:
+                            time.sleep(wait_needed)
+                        except Exception as e:
+                            self.logger.error(
+                                f"Rate limiter error during sleep: {type(e).__name__}: {str(e)}",
+                                exc_info=True
+                            )
+                            raise
+                        finally:
+                            try:
+                                self._lock.acquire()
+                            except Exception as e:
+                                self.logger.error(
+                                    f"Rate limiter error re-acquiring lock: {type(e).__name__}: {str(e)}",
+                                    exc_info=True
+                                )
+                                raise
+                        # Refill tokens again after waiting and update now
+                        self._refill_tokens()
+                        now = time.time()
+                
                 # Check if we have a token available
                 if self.current_tokens >= 1.0:
                     self.current_tokens -= 1.0
                     self.total_requests += 1
-                    wait_time = time.time() - start_time
+                    wait_time = now - start_time
                     self.total_wait_time += wait_time
                     
                     # Track request timestamp for rate calculation
-                    now = time.time()
                     self.request_timestamps.append(now)
                     
                     # Clean old timestamps (keep only last 5 seconds)
