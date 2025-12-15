@@ -7,101 +7,8 @@ from urllib.parse import urljoin, urlparse, urlencode, parse_qs
 import datetime
 import json
 import time
-import random
 from .utils import get_lookup_days, get_api_page_size, get_max_retries
-from .rate_limiter import get_global_rate_limiter
-
-
-class RateLimiter:
-    """
-    Dynamic rate limiter that adjusts delays based on rate limit errors.
-    Handles exponential backoff with jitter and Retry-After headers.
-    """
-    
-    def __init__(self, logger: logging.Logger, initial_delay: float = 0.1, max_delay: float = 60.0):
-        """
-        Initialize the rate limiter.
-        
-        Args:
-            logger: Logger instance for logging
-            initial_delay: Initial delay in seconds (default: 0.1)
-            max_delay: Maximum delay in seconds (default: 60.0)
-        """
-        self.logger = logger
-        self.initial_delay = initial_delay
-        self.max_delay = max_delay
-        self.current_delay = initial_delay
-        self.consecutive_429s = 0
-        self.last_request_time = {}
-        
-    def wait(self, api_name: str = "default"):
-        """
-        Wait before making a request, using current delay.
-        
-        Args:
-            api_name: Name of the API (e.g., "bloodhound", "azure_monitor")
-        """
-        if api_name in self.last_request_time:
-            elapsed = time.time() - self.last_request_time[api_name]
-            if elapsed < self.current_delay:
-                sleep_time = self.current_delay - elapsed
-                time.sleep(sleep_time)
-        
-        self.last_request_time[api_name] = time.time()
-    
-    def handle_rate_limit(self, response: requests.Response = None, api_name: str = "default"):
-        """
-        Handle rate limit error (429) by adjusting delay.
-        
-        Args:
-            response: HTTP response object (may contain Retry-After header)
-            api_name: Name of the API
-        """
-        self.consecutive_429s += 1
-        
-        # Check for Retry-After header
-        retry_after = None
-        if response and 'Retry-After' in response.headers:
-            try:
-                retry_after = int(response.headers['Retry-After'])
-                self.logger.info(f"Rate limit detected for {api_name}. Retry-After header: {retry_after} seconds")
-            except ValueError:
-                pass
-        
-        if retry_after:
-            # Use Retry-After value with some jitter
-            self.current_delay = min(retry_after + random.uniform(0, 2), self.max_delay)
-        else:
-            # Exponential backoff with jitter: delay = initial_delay * (2 ^ consecutive_429s) + jitter
-            base_delay = self.initial_delay * (2 ** min(self.consecutive_429s, 10))  # Cap at 2^10
-            jitter = random.uniform(0, base_delay * 0.1)  # 10% jitter
-            self.current_delay = min(base_delay + jitter, self.max_delay)
-        
-        self.logger.warning(
-            f"Rate limit error for {api_name}. "
-            f"Adjusting delay to {self.current_delay:.2f} seconds. "
-            f"Consecutive 429s: {self.consecutive_429s}"
-        )
-        
-        return self.current_delay
-    
-    def handle_success(self, api_name: str = "default"):
-        """
-        Handle successful request by gradually reducing delay.
-        
-        Args:
-            api_name: Name of the API
-        """
-        if self.consecutive_429s > 0:
-            # Gradually reduce delay on success
-            self.current_delay = max(
-                self.current_delay * 0.8,  # Reduce by 20%
-                self.initial_delay  # Don't go below initial delay
-            )
-            self.consecutive_429s = max(0, self.consecutive_429s - 1)
-            
-            if self.consecutive_429s == 0:
-                self.logger.info(f"Rate limit recovered for {api_name}. Delay reset to {self.current_delay:.2f} seconds")
+from .rate_limiter import get_global_rate_limiter, get_azure_monitor_rate_limiter
 
 
 class BloodhoundManager:
@@ -139,8 +46,8 @@ class BloodhoundManager:
             log_entries = [log_entry]
 
         for attempt in range(max_retries + 1):
-            # Wait before making request (rate limiting)
-            self.azure_monitor_rate_limiter.wait("azure_monitor")
+            # Wait before making request (rate limiting using token bucket)
+            self.azure_monitor_rate_limiter.wait()
             
             # Set timeout to prevent hanging (30 seconds connect, 60 seconds read)
             response = requests.post(
@@ -150,7 +57,7 @@ class BloodhoundManager:
             # Handle rate limit (429)
             if response.status_code == 429:
                 if attempt < max_retries:
-                    delay = self.azure_monitor_rate_limiter.handle_rate_limit(response, "azure_monitor")
+                    delay = self.azure_monitor_rate_limiter.handle_rate_limit(response)
                     self.logger.warning(
                         f"Azure Monitor rate limited. Waiting {delay:.2f} seconds before retry "
                         f"(attempt {attempt + 1}/{max_retries + 1})..."
@@ -172,8 +79,8 @@ class BloodhoundManager:
                 )
                 return {"status": "error", "message": f"HTTP Error {response.status_code}"}
             
-            # Success - reset rate limiter
-            self.azure_monitor_rate_limiter.handle_success("azure_monitor")
+            # Success - recover rate limiter if needed
+            self.azure_monitor_rate_limiter.handle_success()
 
             response_content = (
                 response.json()
@@ -219,8 +126,8 @@ class BloodhoundManager:
         # Use global rate limiter for BloodHound API (shared across all instances)
         self.bloodhound_rate_limiter = get_global_rate_limiter(logger=logger)
         
-        # Keep instance-based rate limiter for Azure Monitor (different API)
-        self.azure_monitor_rate_limiter = RateLimiter(logger, initial_delay=0.1, max_delay=60.0)
+        # Use global rate limiter for Azure Monitor (separate instance with token bucket algorithm)
+        self.azure_monitor_rate_limiter = get_azure_monitor_rate_limiter(logger=logger)
 
     def set_azure_monitor_config(
         self,

@@ -6,6 +6,7 @@ Thread-safe and shared across all BloodhoundManager instances.
 import threading
 import time
 import logging
+import random
 from typing import Optional
 from .utils import get_max_requests_per_second
 
@@ -30,6 +31,7 @@ class GlobalRateLimiter:
             max_requests_per_second: Maximum requests per second (default: 50, well under 65 limit)
             logger: Logger instance (optional)
         """
+        self.original_max_requests_per_second = max_requests_per_second
         self.max_requests_per_second = max_requests_per_second
         self.tokens_per_second = max_requests_per_second
         self.max_tokens = max_requests_per_second  # Bucket capacity equals refill rate
@@ -41,6 +43,11 @@ class GlobalRateLimiter:
         # Statistics
         self.total_requests = 0
         self.total_wait_time = 0.0
+        
+        # Dynamic rate limiting (for handling 429 errors)
+        self.consecutive_429s = 0
+        self.successful_requests_since_429 = 0
+        self.min_requests_per_second = max_requests_per_second * 0.1  # Don't go below 10% of original
         
         # Request rate tracking (for per-second logging)
         self.request_timestamps = []  # Store timestamps of recent requests
@@ -135,7 +142,7 @@ class GlobalRateLimiter:
                     if now - self.last_rate_log_time >= self.rate_log_interval:
                         requests_in_last_second = len([ts for ts in self.request_timestamps if ts > now - 1.0])
                         self.logger.info(
-                            f"Rate Limiter Stats: {requests_in_last_second} requests/second "
+                            f"Rate Limiter Stats: {requests_in_last_second} request(s)/second "
                             f"(Limit: {self.max_requests_per_second}/sec) | "
                             f"Total requests: {self.total_requests} | "
                             f"Available tokens: {self.current_tokens:.2f}/{self.max_tokens:.2f}"
@@ -266,12 +273,144 @@ class GlobalRateLimiter:
             return True
         finally:
             self._lock.release()
+    
+    def handle_rate_limit(self, response=None):
+        """
+        Handle rate limit error (429) by dynamically reducing the rate limit.
+        Uses Retry-After header if available, otherwise uses exponential backoff.
+        
+        Args:
+            response: HTTP response object (may contain Retry-After header)
+        
+        Returns:
+            float: Delay in seconds to wait before retry
+        """
+        with self._lock:
+            self.consecutive_429s += 1
+            self.successful_requests_since_429 = 0
+            
+            # Check for Retry-After header
+            retry_after = None
+            if response and hasattr(response, 'headers') and 'Retry-After' in response.headers:
+                try:
+                    retry_after = int(response.headers['Retry-After'])
+                    self.logger.info(f"Rate limit detected. Retry-After header: {retry_after} seconds")
+                except (ValueError, TypeError):
+                    pass
+            
+            if retry_after:
+                # Reduce rate limit based on Retry-After
+                # If Retry-After is large, reduce rate more aggressively
+                reduction_factor = min(0.5, retry_after / 60.0)  # Max 50% reduction
+                new_rate = max(
+                    self.min_requests_per_second,
+                    self.max_requests_per_second * (1.0 - reduction_factor)
+                )
+                delay = retry_after + random.uniform(0, 2)  # Add jitter
+            else:
+                # Exponential backoff: reduce rate by 50% for each consecutive 429
+                reduction_factor = 0.5 ** min(self.consecutive_429s, 5)  # Cap at 5 consecutive 429s
+                new_rate = max(
+                    self.min_requests_per_second,
+                    self.original_max_requests_per_second * reduction_factor
+                )
+                # Calculate delay based on exponential backoff
+                base_delay = 1.0 * (2 ** min(self.consecutive_429s - 1, 10))
+                delay = base_delay + random.uniform(0, base_delay * 0.2)
+            
+            # Update rate limit
+            old_rate = self.max_requests_per_second
+            self.max_requests_per_second = new_rate
+            self.tokens_per_second = new_rate
+            self.max_tokens = new_rate
+            
+            # Reduce current tokens to reflect the new rate limit
+            if self.current_tokens > new_rate:
+                self.current_tokens = new_rate
+            
+            self.logger.warning(
+                f"Rate limit error (429). Reducing rate limit from {old_rate:.2f} to {new_rate:.2f} req/s. "
+                f"Consecutive 429s: {self.consecutive_429s}. Waiting {delay:.2f} seconds before retry."
+            )
+            
+            return delay
+    
+    def handle_success(self):
+        """
+        Handle successful request by gradually recovering the rate limit.
+        """
+        with self._lock:
+            if self.consecutive_429s > 0:
+                self.successful_requests_since_429 += 1
+                
+                # After 10 successful requests, start recovering rate
+                if self.successful_requests_since_429 >= 10:
+                    # Gradually increase rate limit back towards original
+                    recovery_factor = 1.1  # Increase by 10%
+                    new_rate = min(
+                        self.original_max_requests_per_second,
+                        self.max_requests_per_second * recovery_factor
+                    )
+                    
+                    old_rate = self.max_requests_per_second
+                    self.max_requests_per_second = new_rate
+                    self.tokens_per_second = new_rate
+                    self.max_tokens = new_rate
+                    
+                    # Reduce consecutive 429s counter
+                    self.consecutive_429s = max(0, self.consecutive_429s - 1)
+                    self.successful_requests_since_429 = 0
+                    
+                    if self.consecutive_429s == 0:
+                        # Fully recovered
+                        self.max_requests_per_second = self.original_max_requests_per_second
+                        self.tokens_per_second = self.original_max_requests_per_second
+                        self.max_tokens = self.original_max_requests_per_second
+                        self.logger.info(
+                            f"Rate limit fully recovered. Rate limit restored to {self.original_max_requests_per_second:.2f} req/s."
+                        )
+                    else:
+                        self.logger.info(
+                            f"Rate limit recovering. Increased from {old_rate:.2f} to {new_rate:.2f} req/s. "
+                            f"Consecutive 429s remaining: {self.consecutive_429s}"
+                        )
+
+
+# Azure Monitor rate limiter instance (separate from BloodHound API)
+_azure_monitor_rate_limiter: Optional[GlobalRateLimiter] = None
+_azure_monitor_lock = threading.Lock()
+
+def get_azure_monitor_rate_limiter(max_requests_per_second: Optional[float] = None,
+                                   logger: Optional[logging.Logger] = None) -> GlobalRateLimiter:
+    """
+    Get the Azure Monitor rate limiter instance.
+    Uses a separate instance from the BloodHound API rate limiter.
+    Rate limit is read from MAX_REQUESTS_PER_SECOND_LIMIT environment variable.
+    
+    Args:
+        max_requests_per_second: Maximum requests per second (default: from env var MAX_REQUESTS_PER_SECOND_LIMIT)
+        logger: Logger instance (optional)
+    
+    Returns:
+        GlobalRateLimiter: The Azure Monitor rate limiter instance
+    """
+    global _azure_monitor_rate_limiter
+    
+    if _azure_monitor_rate_limiter is None:
+        with _azure_monitor_lock:
+            if _azure_monitor_rate_limiter is None:
+                if max_requests_per_second is None:
+                    # Get from environment variable MAX_REQUESTS_PER_SECOND_LIMIT (capped at 50)
+                    max_requests_per_second = get_max_requests_per_second()
+                _azure_monitor_rate_limiter = GlobalRateLimiter(max_requests_per_second, logger)
+    
+    return _azure_monitor_rate_limiter
 
 
 # Convenience function to get the global rate limiter instance
 def get_global_rate_limiter(logger: Optional[logging.Logger] = None) -> GlobalRateLimiter:
     """
-    Get the global rate limiter instance.
+    Get the global rate limiter instance for BloodHound API.
     
     Args:
         logger: Logger instance (optional)
