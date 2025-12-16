@@ -55,48 +55,24 @@ class BloodhoundManager:
                     api_url, headers=headers, data=json.dumps(log_entries), timeout=(30, 60)
                 )
             except (requests.exceptions.ConnectionError, requests.exceptions.RequestException) as e:
-                # Check if it's a DNS resolution error or max retries exceeded (often related to Azure Monitor data ingestion limits)
-                error_str = str(e).lower()
-                is_dns_error = (
-                    "name resolution" in error_str or 
-                    "failed to resolve" in error_str or
-                    "temporary failure in name resolution" in error_str
+                # Connection errors (DNS, max retries, etc.) - treat as data ingestion limit issue
+                # Increase delay with each retry: 30s, 60s, 90s, 120s (max 2 minutes)
+                delay = min(30 + (attempt * 30), 120)  # Start at 30s, increase by 30s each attempt, max 120s
+                self.logger.warning(
+                    f"Connection error (possibly due to Azure Monitor data ingestion limit). "
+                    f"Waiting {delay} seconds before retry (attempt {attempt + 1}/{max_retries + 1})... "
+                    f"Error: {str(e)}"
                 )
-                is_max_retries_error = "max retries exceeded" in error_str
-                
-                if is_dns_error or is_max_retries_error:
-                    error_type = "DNS resolution" if is_dns_error else "Max retries exceeded"
-                    self.logger.warning(
-                        f"{error_type} error (possibly due to Azure Monitor data ingestion limit). "
-                        f"Waiting 30 seconds before retry (attempt {attempt + 1}/{max_retries + 1})... "
-                        f"Error: {str(e)}"
-                    )
-                    if attempt < max_retries:
-                        time.sleep(30)  # Wait 30 seconds for DNS/data limit issues
-                        continue
-                    else:
-                        self._log_error(
-                            f"[Send Error] {error_type} error after {max_retries} retries. "
-                            f"Failed to send {len(log_entries)} log entry(ies) to Azure Monitor. "
-                            f"Error: {str(e)}"
-                        )
-                        return {"status": "error", "message": f"{error_type} error after {max_retries} retries"}
+                if attempt < max_retries:
+                    time.sleep(delay)  # Increasing delay for connection/data limit issues
+                    continue
                 else:
-                    # Other connection errors
-                    self.logger.warning(
-                        f"Connection error. Waiting before retry (attempt {attempt + 1}/{max_retries + 1})... "
+                    self._log_error(
+                        f"[Send Error] Connection error after {max_retries} retries. "
+                        f"Failed to send {len(log_entries)} log entry(ies) to Azure Monitor. "
                         f"Error: {str(e)}"
                     )
-                    if attempt < max_retries:
-                        time.sleep(min(2.0 * (attempt + 1), 10.0))  # Exponential backoff, max 10 seconds
-                        continue
-                    else:
-                        self._log_error(
-                            f"[Send Error] Connection error after {max_retries} retries. "
-                            f"Failed to send {len(log_entries)} log entry(ies) to Azure Monitor. "
-                            f"Error: {str(e)}"
-                        )
-                        return {"status": "error", "message": f"Connection error after {max_retries} retries"}
+                    return {"status": "error", "message": f"Connection error after {max_retries} retries"}
             
             # Handle rate limit (429)
             if response.status_code == 429:
@@ -115,7 +91,24 @@ class BloodhoundManager:
                     )
                     return {"status": "error", "message": f"Rate limit error after {max_retries} retries"}
             
-            # Handle other errors
+            # Handle service unavailable errors (502, 503, 504) - possibly due to data ingestion limits
+            if response.status_code in [502, 503, 504]:
+                self.logger.warning(
+                    f"Service unavailable error (HTTP {response.status_code}, possibly due to Azure Monitor data ingestion limit). "
+                    f"Waiting 30 seconds before retry (attempt {attempt + 1}/{max_retries + 1})..."
+                )
+                if attempt < max_retries:
+                    time.sleep(30)  # Wait 30 seconds for service/data limit issues
+                    continue
+                else:
+                    self._log_error(
+                        f"[Send Error] Service unavailable error (HTTP {response.status_code}) after {max_retries} retries. "
+                        f"Failed to send {len(log_entries)} log entry(ies) to Azure Monitor. "
+                        f"Response: {response.text}"
+                    )
+                    return {"status": "error", "message": f"Service unavailable error (HTTP {response.status_code}) after {max_retries} retries"}
+            
+            # Handle other HTTP errors
             if response.status_code >= 400:
                 self._log_error(
                     f"[Send Error] Failed to send {len(log_entries)} log entry(ies) to Azure Monitor: "
