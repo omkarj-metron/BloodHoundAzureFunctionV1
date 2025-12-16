@@ -17,10 +17,32 @@ class BloodhoundManager:
     audit logs, finding trends, posture history, posture statistics, and attack paths.
     """
     
+    def _get_retry_after_delay(self, response):
+        """
+        Extract Retry-After header from Azure Monitor response.
+        According to Azure Monitor API docs, Retry-After header is included when
+        rate limits (requests/minute or data/minute) are exceeded.
+        
+        Args:
+            response: HTTP response object
+            
+        Returns:
+            int or None: Retry-After value in seconds, or None if not present/invalid
+        """
+        if response and hasattr(response, 'headers') and 'Retry-After' in response.headers:
+            try:
+                retry_after = int(response.headers['Retry-After'])
+                if retry_after > 0:
+                    return retry_after
+            except (ValueError, TypeError):
+                pass
+        return None
+
     def _send_to_azure_monitor(self, log_entry, bearer_token, dce_uri, dcr_immutable_id, table_name, max_retries: int = None):
         """
         Helper to send log entry(ies) to Azure Monitor via Data Collection Endpoint (DCE).
         Handles POST request, error handling, logging, and rate limiting.
+        Respects Retry-After header from Azure Monitor responses as per API documentation.
         
         Args:
             log_entry: Single log entry dict OR list of log entry dicts for batching
@@ -74,14 +96,24 @@ class BloodhoundManager:
                     )
                     return {"status": "error", "message": f"Connection error after {max_retries} retries"}
             
-            # Handle rate limit (429)
+            # Handle rate limit (429) - check Retry-After header
             if response.status_code == 429:
                 if attempt < max_retries:
-                    delay = self.azure_monitor_rate_limiter.handle_rate_limit(response)
-                    self.logger.warning(
-                        f"Azure Monitor rate limited. Waiting {delay:.2f} seconds before retry "
-                        f"(attempt {attempt + 1}/{max_retries + 1})..."
-                    )
+                    # Check for Retry-After header first
+                    retry_after = self._get_retry_after_delay(response)
+                    if retry_after:
+                        delay = retry_after
+                        self.logger.warning(
+                            f"Azure Monitor rate limited (HTTP 429). Retry-After header: {retry_after} seconds. "
+                            f"Waiting {delay} seconds before retry (attempt {attempt + 1}/{max_retries + 1})..."
+                        )
+                    else:
+                        # Fall back to rate limiter's handle_rate_limit method
+                        delay = self.azure_monitor_rate_limiter.handle_rate_limit(response)
+                        self.logger.warning(
+                            f"Azure Monitor rate limited (HTTP 429). Waiting {delay:.2f} seconds before retry "
+                            f"(attempt {attempt + 1}/{max_retries + 1})..."
+                        )
                     time.sleep(delay)
                     continue
                 else:
@@ -91,14 +123,26 @@ class BloodhoundManager:
                     )
                     return {"status": "error", "message": f"Rate limit error after {max_retries} retries"}
             
-            # Handle service unavailable errors (502, 503, 504) - possibly due to data ingestion limits
+            # Handle service unavailable errors (502, 503, 504) - check Retry-After header
+            # These can occur when data ingestion limits (2 GB/min or 12,000 requests/min) are exceeded
             if response.status_code in [502, 503, 504]:
-                self.logger.warning(
-                    f"Service unavailable error (HTTP {response.status_code}, possibly due to Azure Monitor data ingestion limit). "
-                    f"Waiting 30 seconds before retry (attempt {attempt + 1}/{max_retries + 1})..."
-                )
+                retry_after = self._get_retry_after_delay(response)
                 if attempt < max_retries:
-                    time.sleep(30)  # Wait 30 seconds for service/data limit issues
+                    if retry_after:
+                        delay = retry_after
+                        self.logger.warning(
+                            f"Service unavailable error (HTTP {response.status_code}, possibly due to Azure Monitor data ingestion limit). "
+                            f"Retry-After header: {retry_after} seconds. "
+                            f"Waiting {delay} seconds before retry (attempt {attempt + 1}/{max_retries + 1})..."
+                        )
+                    else:
+                        # Default delay if no Retry-After header
+                        delay = 30
+                        self.logger.warning(
+                            f"Service unavailable error (HTTP {response.status_code}, possibly due to Azure Monitor data ingestion limit). "
+                            f"No Retry-After header found. Waiting {delay} seconds before retry (attempt {attempt + 1}/{max_retries + 1})..."
+                        )
+                    time.sleep(delay)
                     continue
                 else:
                     self._log_error(
